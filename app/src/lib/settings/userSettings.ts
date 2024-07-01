@@ -3,6 +3,8 @@ import { get, writable, type Writable } from 'svelte/store';
 const SETTINGS_KEY = 'settings-json';
 export const SETTINGS = Symbol('Settings');
 
+export type ScrollbarVisilitySettings = 'scroll' | 'hover' | 'always';
+
 export interface Settings {
 	aiSummariesEnabled?: boolean;
 	bottomPanelExpanded: boolean;
@@ -15,9 +17,8 @@ export interface Settings {
 	defaultFileWidth: number;
 	defaultTreeHeight: number;
 	zoom: number;
-	scrollbarVisabilityOnHover: boolean;
+	scrollbarVisibilityState: ScrollbarVisilitySettings;
 	tabSize: number;
-	showHistoryView: boolean;
 }
 
 const defaults: Settings = {
@@ -31,9 +32,8 @@ const defaults: Settings = {
 	defaultTreeHeight: 100,
 	stashedBranchesHeight: 150,
 	zoom: 1,
-	scrollbarVisabilityOnHover: false,
-	tabSize: 4,
-	showHistoryView: false
+	scrollbarVisibilityState: 'scroll',
+	tabSize: 4
 };
 
 export function loadUserSettings(): Writable<Settings> {

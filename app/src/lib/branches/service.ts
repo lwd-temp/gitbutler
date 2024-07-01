@@ -106,11 +106,7 @@ function mergeBranchesAndPrs(
 	if (vbranches) {
 		contributions.push(
 			...vbranches.map((vb) => {
-				const upstream = vb.upstream?.upstream;
-				const pr =
-					upstream && pullRequests
-						? pullRequests.find((pr) => isBranchNameMatch(pr.targetBranch, upstream))
-						: undefined;
+				const pr = pullRequests?.find((pr) => pr.sha === vb.head);
 				return new CombinedBranch({ vbranch: vb, remoteBranch: vb.upstream, pr });
 			})
 		);
@@ -120,11 +116,9 @@ function mergeBranchesAndPrs(
 	if (remoteBranches) {
 		contributions.push(
 			...remoteBranches
-				.filter((rb) => !vbranches?.some((vb) => isBranchNameMatch(rb.name, vb.upstreamName)))
+				.filter((rb) => !contributions.some((cb) => rb.sha === cb.upstreamSha))
 				.map((rb) => {
-					const pr = pullRequests
-						? pullRequests.find((pr) => isBranchNameMatch(pr.targetBranch, rb.name))
-						: undefined;
+					const pr = pullRequests?.find((pr) => pr.sha === rb.sha);
 					return new CombinedBranch({ remoteBranch: rb, pr });
 				})
 		);
@@ -134,11 +128,7 @@ function mergeBranchesAndPrs(
 	if (pullRequests) {
 		contributions.push(
 			...pullRequests
-				.filter((pr) =>
-					remoteBranches
-						? !remoteBranches.some((rb) => isBranchNameMatch(pr.targetBranch, rb.name))
-						: false
-				)
+				.filter((pr) => !contributions.some((cb) => pr.sha === cb.upstreamSha))
 				.map((pr) => {
 					return new CombinedBranch({ pr });
 				})
@@ -152,9 +142,4 @@ function mergeBranchesAndPrs(
 			return (a.modifiedAt || new Date(0)) < (b.modifiedAt || new Date(0)) ? 1 : -1;
 		});
 	return filtered;
-}
-
-function isBranchNameMatch(left: string | undefined, right: string | undefined): boolean {
-	if (!left || !right) return false;
-	return left.split('/').pop() === right.split('/').pop();
 }

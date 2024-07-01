@@ -1,16 +1,15 @@
 <script async lang="ts">
-	import ProjectNameLabel from './ProjectNameLabel.svelte';
+	import ProjectNameLabel from '../shared/ProjectNameLabel.svelte';
 	import { Project } from '$lib/backend/projects';
 	import BackButton from '$lib/components/BackButton.svelte';
-	import Button from '$lib/components/Button.svelte';
-	import GithubIntegration from '$lib/components/GithubIntegration.svelte';
 	import Login from '$lib/components/Login.svelte';
-	import Select from '$lib/components/Select.svelte';
-	import SelectItem from '$lib/components/SelectItem.svelte';
 	import SetupFeature from '$lib/components/SetupFeature.svelte';
-	import Toggle from '$lib/components/Toggle.svelte';
 	import { projectAiGenEnabled } from '$lib/config/config';
-	import { projectAiGenAutoBranchNamingEnabled } from '$lib/config/config';
+	import GithubIntegration from '$lib/settings/GithubIntegration.svelte';
+	import Button from '$lib/shared/Button.svelte';
+	import Select from '$lib/shared/Select.svelte';
+	import SelectItem from '$lib/shared/SelectItem.svelte';
+	import Toggle from '$lib/shared/Toggle.svelte';
 	import { UserService } from '$lib/stores/user';
 	import { getContext } from '$lib/utils/context';
 	import { platform } from '@tauri-apps/api/os';
@@ -30,7 +29,6 @@
 	}>();
 
 	const aiGenEnabled = projectAiGenEnabled(project.id);
-	const aiGenAutoBranchNamingEnabled = projectAiGenAutoBranchNamingEnabled(project.id);
 
 	let aiGenCheckbox: Toggle;
 	let loading = false;
@@ -91,7 +89,7 @@
 	<div class="project-setup__fields">
 		<div class="project-setup__field-wrap">
 			<Select items={remoteBranches} bind:value={selectedBranch} itemId="name" labelId="name">
-				<SelectItem slot="template" let:item let:selected {selected}>
+				<SelectItem slot="template" let:item let:selected {selected} let:highlighted {highlighted}>
 					{item.name}
 				</SelectItem>
 			</Select>
@@ -104,7 +102,14 @@
 		{#if remotes.length > 1}
 			<div class="project-setup__field-wrap">
 				<Select items={remotes} bind:value={selectedRemote} itemId="name" labelId="name">
-					<SelectItem slot="template" let:item let:selected {selected}>
+					<SelectItem
+						slot="template"
+						let:item
+						let:selected
+						{selected}
+						let:highlighted
+						{highlighted}
+					>
 						{item.name}
 					</SelectItem>
 				</Select>
@@ -167,7 +172,6 @@
 						id="aiGenEnabled"
 						on:change={() => {
 							$aiGenEnabled = !$aiGenEnabled;
-							$aiGenAutoBranchNamingEnabled = $aiGenEnabled;
 						}}
 					/>
 				{/if}
@@ -241,7 +245,7 @@
 			icon="chevron-right-small"
 			id="set-base-branch"
 		>
-			{#if $platformName == 'win32'}
+			{#if $platformName === 'win32'}
 				Let's go
 			{:else}
 				Continue
@@ -254,7 +258,7 @@
 	.project-setup {
 		display: flex;
 		flex-direction: column;
-		gap: var(--size-20);
+		gap: 20px;
 	}
 
 	.features-wrapper {
@@ -264,14 +268,14 @@
 	.project-setup__info {
 		display: flex;
 		flex-direction: column;
-		gap: var(--size-12);
+		gap: 12px;
 	}
 
 	.project-setup__fields {
 		display: flex;
 		flex-direction: column;
-		gap: var(--size-16);
-		padding-bottom: var(--size-10);
+		gap: 16px;
+		padding-bottom: 10px;
 	}
 
 	.project-setup__description-text {
@@ -281,23 +285,19 @@
 	.project-setup__field-wrap {
 		display: flex;
 		flex-direction: column;
-		gap: var(--size-12);
+		gap: 12px;
 	}
 
 	.floating-buttons {
 		display: flex;
 		justify-content: flex-end;
 		width: 100%;
-		gap: var(--size-8);
-	}
-
-	.project-setup__toggle-label {
-		width: 100%;
+		gap: 8px;
 	}
 
 	.success-icon {
 		display: inline;
-		margin-top: calc(var(--size-2) * -1);
-		margin-left: var(--size-2);
+		margin-top: -2px;
+		margin-left: 2px;
 	}
 </style>

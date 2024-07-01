@@ -1,6 +1,6 @@
 <script lang="ts">
-	import InfoMessage from '$lib/components/InfoMessage.svelte';
 	import { dismissToast, toastStore } from '$lib/notifications/toasts';
+	import InfoMessage from '$lib/shared/InfoMessage.svelte';
 	import { marked } from 'marked';
 	import { slide } from 'svelte/transition';
 
@@ -12,11 +12,13 @@
 </script>
 
 <div class="toast-controller hide-native-scrollbar">
+	<!-- eslint-disable-next-line svelte/valid-compile -->
 	{#each $toastStore as toast (toast.id)}
 		<div transition:slide={{ duration: 170 }}>
 			<InfoMessage
 				style={toast.style ?? 'neutral'}
 				secondary="Dismiss"
+				error={toast.error}
 				on:secondary={() => dismissToast(toast.id)}
 				shadow
 			>
@@ -26,10 +28,6 @@
 
 				<svelte:fragment slot="content">
 					{@html marked.parse(toast.message ?? '', { renderer })}
-				</svelte:fragment>
-
-				<svelte:fragment slot="error">
-					{toast.errorMessage}
 				</svelte:fragment>
 			</InfoMessage>
 		</div>
@@ -45,9 +43,9 @@
 
 		bottom: 0;
 		right: 0;
-		padding: var(--size-12) var(--size-12) var(--size-12) 0;
-		gap: var(--size-8);
-		max-width: 30rem;
+		padding: 12px 12px 12px 0;
+		gap: 8px;
+		max-width: 480px;
 		z-index: var(--z-blocker);
 		overflow-y: auto;
 		max-height: 100%;

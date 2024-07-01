@@ -1,33 +1,35 @@
 <script lang="ts">
+	import { Project } from '$lib/backend/projects';
 	import BaseBranch from '$lib/components/BaseBranch.svelte';
-	import FileCard from '$lib/components/FileCard.svelte';
 	import FullviewLoading from '$lib/components/FullviewLoading.svelte';
-	import Resizer from '$lib/components/Resizer.svelte';
-	import ScrollableContainer from '$lib/components/ScrollableContainer.svelte';
+	import FileCard from '$lib/file/FileCard.svelte';
 	import { SETTINGS, type Settings } from '$lib/settings/userSettings';
+	import Resizer from '$lib/shared/Resizer.svelte';
+	import ScrollableContainer from '$lib/shared/ScrollableContainer.svelte';
 	import { getContext, getContextStoreBySymbol } from '$lib/utils/context';
 	import { BaseBranchService } from '$lib/vbranches/baseBranch';
-	import { createSelectedFiles } from '$lib/vbranches/contexts';
 	import { FileIdSelection } from '$lib/vbranches/fileIdSelection';
 	import lscache from 'lscache';
 	import { onMount, setContext } from 'svelte';
+	import { writable } from 'svelte/store';
+
 	const defaultBranchWidthRem = 30;
 	const laneWidthKey = 'historyLaneWidth';
 	const userSettings = getContextStoreBySymbol<Settings>(SETTINGS);
 
 	const baseBranchService = getContext(BaseBranchService);
 	const baseBranch = baseBranchService.base;
+	const project = getContext(Project);
 
-	const fileIdSelection = new FileIdSelection();
+	const fileIdSelection = new FileIdSelection(project.id, writable([]));
 	setContext(FileIdSelection, fileIdSelection);
 
-	const selectedFiles = createSelectedFiles([]);
+	$: selectedFile = fileIdSelection.selectedFile;
 
 	let rsViewport: HTMLDivElement;
 	let laneWidth: number;
 
 	$: error$ = baseBranchService.error$;
-	$: selected = $selectedFiles.length == 1 ? $selectedFiles[0] : undefined;
 
 	onMount(() => {
 		laneWidth = lscache.get(laneWidthKey);
@@ -61,17 +63,19 @@
 			/>
 		</div>
 		<div class="base__right">
-			{#if selected}
-				<FileCard
-					conflicted={selected.conflicted}
-					file={selected}
-					isUnapplied={false}
-					readonly={true}
-					on:close={() => {
-						fileIdSelection.clear();
-					}}
-				/>
-			{/if}
+			{#await $selectedFile then selected}
+				{#if selected}
+					<FileCard
+						conflicted={selected.conflicted}
+						file={selected}
+						isUnapplied={false}
+						readonly={true}
+						on:close={() => {
+							fileIdSelection.clear();
+						}}
+					/>
+				{/if}
+			{/await}
 		</div>
 	</div>
 {/if}
@@ -79,7 +83,7 @@
 <style lang="postcss">
 	.base {
 		display: flex;
-		flex-grow: 1;
+		width: 100%;
 		overflow-x: auto;
 	}
 	.base__left {
@@ -93,11 +97,11 @@
 		display: flex;
 		overflow-x: auto;
 		align-items: flex-start;
-		padding: var(--size-12) var(--size-12) var(--size-12) var(--size-6);
-		width: 50rem;
+		padding: 12px 12px 12px 6px;
+		width: 800px;
 	}
 	.card {
-		margin: var(--size-12) var(--size-6) var(--size-12) var(--size-12);
-		padding: var(--size-16);
+		margin: 12px 6px 12px 12px;
+		padding: 16px;
 	}
 </style>

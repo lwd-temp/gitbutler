@@ -4,7 +4,7 @@ import * as toasts from '$lib/utils/toasts';
 import posthog from 'posthog-js';
 import type { RemoteBranchService } from '$lib/stores/remoteBranches';
 import type { BaseBranchService } from './baseBranch';
-import type { Branch, Hunk, LocalFile } from './types';
+import type { Branch, Hunk, LocalFile, NameConflictResolution } from './types';
 import type { VirtualBranchService } from './virtualBranch';
 
 export class BranchController {
@@ -64,7 +64,11 @@ export class BranchController {
 			});
 			posthog.capture('Commit Successful');
 		} catch (err: any) {
-			showError('Failed to commit changes', err);
+			if (err.code === 'errors.commit.signing_failed') {
+				showSignError(err);
+			} else {
+				showError('Failed to commit changes', err);
+			}
 			posthog.capture('Commit Failed', err);
 			throw err;
 		}
@@ -72,7 +76,7 @@ export class BranchController {
 
 	async mergeUpstream(branch: string) {
 		try {
-			await invoke<void>('merge_virtual_branch_upstream', {
+			await invoke<void>('integrate_upstream_commits', {
 				projectId: this.projectId,
 				branch
 			});
@@ -100,6 +104,17 @@ export class BranchController {
 			});
 		} catch (err) {
 			showError('Failed to update remote name', err);
+		}
+	}
+
+	async updateBranchAllowRebasing(branchId: string, allowRebasing: boolean) {
+		try {
+			await invoke<void>('update_virtual_branch', {
+				projectId: this.projectId,
+				branch: { id: branchId, allow_rebasing: allowRebasing }
+			});
+		} catch (err) {
+			showError('Failed to update branch allow rebasing', err);
 		}
 	}
 
@@ -165,10 +180,17 @@ export class BranchController {
 		}
 	}
 
-	async unapplyBranch(branchId: string) {
+	async convertToRealBranch(
+		branchId: string,
+		nameConflictResolution: NameConflictResolution = { type: 'suffix', value: undefined }
+	) {
 		try {
-			// TODO: make this optimistic again.
-			await invoke<void>('unapply_branch', { projectId: this.projectId, branch: branchId });
+			await invoke<void>('convert_to_real_branch', {
+				projectId: this.projectId,
+				branch: branchId,
+				nameConflictResolution
+			});
+			this.remoteBranchService.reload();
 		} catch (err) {
 			showError('Failed to unapply branch', err);
 		}
@@ -207,7 +229,7 @@ export class BranchController {
                         Please check our [documentation](https://docs.gitbutler.com/troubleshooting/fetch-push)
                         on fetching and pushing for ways to resolve the problem.
                     `,
-					errorMessage: err.message,
+					error: err.message,
 					style: 'error'
 				});
 			} else {
@@ -219,7 +241,7 @@ export class BranchController {
                         Please check our [documentation](https://docs.gitbutler.com/troubleshooting/fetch-push)
                         on fetching and pushing for ways to resolve the problem.
                     `,
-					errorMessage: err.message,
+					error: err.message,
 					style: 'error'
 				});
 			}
@@ -238,9 +260,18 @@ export class BranchController {
 		}
 	}
 
-	async updateBaseBranch() {
+	async updateBaseBranch(): Promise<string | undefined> {
 		try {
-			await invoke<object>('update_base_branch', { projectId: this.projectId });
+			const stashedConflicting = await invoke<Branch[]>('update_base_branch', {
+				projectId: this.projectId
+			});
+			if (stashedConflicting.length > 0) {
+				return `The following branches were stashed due to a merge conflict during updating the workspace: \n\n \
+${stashedConflicting.map((branch) => branch.name).join('\n')} \n\n \
+You can find them in the 'Branches' sidebar in order to resolve conflicts.`;
+			} else {
+				return undefined;
+			}
 		} finally {
 			this.targetBranchService.reload();
 		}
@@ -256,20 +287,6 @@ export class BranchController {
 			showError('Failed to create virtual branch', err);
 		} finally {
 			this.remoteBranchService.reload();
-			this.targetBranchService.reload();
-		}
-	}
-
-	async cherryPick(branchId: string, targetCommitOid: string) {
-		try {
-			await invoke<void>('cherry_pick_onto_virtual_branch', {
-				projectId: this.projectId,
-				branchId,
-				targetCommitOid
-			});
-		} catch (err: any) {
-			showError('Failed to cherry-pick commit', err);
-		} finally {
 			this.targetBranchService.reload();
 		}
 	}
@@ -290,7 +307,12 @@ export class BranchController {
 				targetCommitOid
 			});
 		} catch (err: any) {
-			showError('Failed to squash commit', err);
+			// TODO: Probably we wanna have error code checking in a more generic way
+			if (err.code === 'errors.commit.signing_failed') {
+				showSignError(err);
+			} else {
+				showError('Failed to squash commit', err);
+			}
 		}
 	}
 
@@ -347,7 +369,12 @@ export class BranchController {
 				message
 			});
 		} catch (err: any) {
-			showError('Failed to change commit message', err);
+			// TODO: Probably we wanna have error code checking in a more generic way
+			if (err.code === 'errors.commit.signing_failed') {
+				showSignError(err);
+			} else {
+				showError('Failed to change commit message', err);
+			}
 		}
 	}
 
@@ -360,7 +387,12 @@ export class BranchController {
 				offset
 			});
 		} catch (err: any) {
-			showError('Failed to insert blank commit', err);
+			// TODO: Probably we wanna have error code checking in a more generic way
+			if (err.code === 'errors.commit.signing_failed') {
+				showSignError(err);
+			} else {
+				showError('Failed to insert blank commit', err);
+			}
 		}
 	}
 
@@ -373,7 +405,12 @@ export class BranchController {
 				offset
 			});
 		} catch (err: any) {
-			showError('Failed to reorder blank commit', err);
+			// TODO: Probably we wanna have error code checking in a more generic way
+			if (err.code === 'errors.commit.signing_failed') {
+				showSignError(err);
+			} else {
+				showError('Failed to reorder blank commit', err);
+			}
 		}
 	}
 
@@ -385,7 +422,25 @@ export class BranchController {
 				commitOid
 			});
 		} catch (err: any) {
-			showError('Failed to move commit', err);
+			// TODO: Probably we wanna have error code checking in a more generic way
+			if (err.code === 'errors.commit.signing_failed') {
+				showSignError(err);
+			} else {
+				showError('Failed to move commit', err);
+			}
 		}
 	}
+}
+
+function showSignError(err: any) {
+	showToast({
+		title: 'Failed to commit due to signing error',
+		message: `
+Signing is now disabled, so subsequent commits will not fail. You can configure commit signing in the project settings.
+
+Please check our [documentation](https://docs.gitbutler.com/features/virtual-branches/verifying-commits) on setting up commit signing and verification.
+					`,
+		error: err.message,
+		style: 'error'
+	});
 }

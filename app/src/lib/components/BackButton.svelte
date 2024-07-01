@@ -1,11 +1,11 @@
 <script>
-	import Button from './Button.svelte';
+	import Button from '$lib/shared/Button.svelte';
 	import { goto } from '$app/navigation';
 </script>
 
 <Button
 	style="ghost"
-	kind="solid"
+	outline
 	on:mousedown={() => {
 		if (history.length > 0) {
 			history.back();

@@ -64,7 +64,7 @@ export class UpdaterService {
 				if (update?.shouldUpdate) return update.manifest;
 			}),
 			// We don't need the stream to emit if the result is the same version
-			distinctUntilChanged((prev, curr) => prev?.version == curr?.version),
+			distinctUntilChanged((prev, curr) => prev?.version === curr?.version),
 			// Hide offline/timeout errors since no app ever notifies you about this
 			catchError((err) => {
 				if (!isOffline(err) && !isTimeoutError(err)) {
@@ -106,11 +106,11 @@ export class UpdaterService {
 }
 
 function isOffline(err: any): boolean {
-	return typeof err == 'string' && err.includes('Could not fetch a valid release');
+	return typeof err === 'string' && err.includes('Could not fetch a valid release');
 }
 
 function isTimeoutError(err: any): boolean {
-	return err?.name == 'TimeoutError';
+	return err?.name === 'TimeoutError';
 }
 
 function showErrorToast(err: any) {
@@ -123,7 +123,7 @@ function showErrorToast(err: any) {
             You can download the latest release from our
             [downloads](https://app.gitbutler.com/downloads) page.
         `,
-		errorMessage: err,
+		error: err,
 		style: 'error'
 	});
 }

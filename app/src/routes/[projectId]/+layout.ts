@@ -1,5 +1,9 @@
 import { invoke } from '$lib/backend/ipc';
+import { BranchDragActionsFactory } from '$lib/branches/dragActions.js';
 import { BranchService } from '$lib/branches/service';
+import { CommitDragActionsFactory } from '$lib/commits/dragActions.js';
+import { ReorderDropzoneManagerFactory } from '$lib/dragging/reorderDropzoneManager';
+import { HistoryService } from '$lib/history/history';
 import { getFetchNotifications } from '$lib/stores/fetches';
 import { getHeads } from '$lib/stores/head';
 import { RemoteBranchService } from '$lib/stores/remoteBranches';
@@ -37,8 +41,9 @@ export async function load({ params, parent }) {
 
 	const fetches$ = getFetchNotifications(projectId);
 	const heads$ = getHeads(projectId);
-	const gbBranchActive$ = heads$.pipe(map((head) => head == 'gitbutler/integration'));
+	const gbBranchActive$ = heads$.pipe(map((head) => head === 'gitbutler/integration'));
 
+	const historyService = new HistoryService(projectId);
 	const baseBranchService = new BaseBranchService(projectId, remoteUrl$, fetches$, heads$);
 	const vbranchService = new VirtualBranchService(projectId, gbBranchActive$);
 
@@ -61,18 +66,26 @@ export async function load({ params, parent }) {
 		branchController
 	);
 
+	const branchDragActionsFactory = new BranchDragActionsFactory(branchController);
+	const commitDragActionsFactory = new CommitDragActionsFactory(branchController, project);
+	const reorderDropzoneManagerFactory = new ReorderDropzoneManagerFactory(branchController);
+
 	return {
 		authService,
 		baseBranchService,
 		branchController,
 		branchService,
 		githubService,
+		historyService,
 		projectId,
 		project,
 		remoteBranchService,
 		vbranchService,
 
 		// These observables are provided for convenience
-		gbBranchActive$
+		gbBranchActive$,
+		branchDragActionsFactory,
+		commitDragActionsFactory,
+		reorderDropzoneManagerFactory
 	};
 }

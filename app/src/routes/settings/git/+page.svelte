@@ -1,13 +1,13 @@
 <script lang="ts">
 	import { AuthService } from '$lib/backend/auth';
 	import { GitConfigService } from '$lib/backend/gitConfigService';
-	import Button from '$lib/components/Button.svelte';
-	import Link from '$lib/components/Link.svelte';
 	import SectionCard from '$lib/components/SectionCard.svelte';
-	import Spacer from '$lib/components/Spacer.svelte';
-	import TextBox from '$lib/components/TextBox.svelte';
-	import Toggle from '$lib/components/Toggle.svelte';
-	import ContentWrapper from '$lib/components/settings/ContentWrapper.svelte';
+	import ContentWrapper from '$lib/settings/ContentWrapper.svelte';
+	import Button from '$lib/shared/Button.svelte';
+	import Link from '$lib/shared/Link.svelte';
+	import Spacer from '$lib/shared/Spacer.svelte';
+	import TextBox from '$lib/shared/TextBox.svelte';
+	import Toggle from '$lib/shared/Toggle.svelte';
 	import { copyToClipboard } from '$lib/utils/clipboard';
 	import { getContext } from '$lib/utils/context';
 	import { openExternalUrl } from '$lib/utils/url';
@@ -16,7 +16,6 @@
 	const gitConfig = getContext(GitConfigService);
 	const authService = getContext(AuthService);
 
-	let signCommits = false;
 	let annotateCommits = true;
 	let sshKey = '';
 
@@ -25,15 +24,9 @@
 		gitConfig.set('gitbutler.gitbutlerCommitter', annotateCommits ? '1' : '0');
 	}
 
-	function toggleSigningSetting() {
-		signCommits = !signCommits;
-		gitConfig.set('gitbutler.signCommits', signCommits ? 'true' : 'false');
-	}
-
 	onMount(async () => {
 		sshKey = await authService.getPublicKey();
-		annotateCommits = (await gitConfig.get('gitbutler.gitbutlerCommitter')) == '1';
-		signCommits = (await gitConfig.get('gitbutler.signCommits')) == 'true';
+		annotateCommits = (await gitConfig.get('gitbutler.gitbutlerCommitter')) === '1';
 	});
 </script>
 
@@ -52,7 +45,7 @@
 			</Link>
 		</svelte:fragment>
 		<svelte:fragment slot="actions">
-			<Toggle id="committerSigning" checked={annotateCommits} on:change={toggleCommitterSigning} />
+			<Toggle id="committerSigning" checked={annotateCommits} on:click={toggleCommitterSigning} />
 		</svelte:fragment>
 	</SectionCard>
 
@@ -72,7 +65,7 @@
 			</Button>
 			<Button
 				style="ghost"
-				kind="solid"
+				outline
 				icon="open-link"
 				on:mousedown={() => {
 					openExternalUrl('https://github.com/settings/ssh/new');
@@ -81,23 +74,5 @@
 				Add key to GitHub
 			</Button>
 		</div>
-	</SectionCard>
-
-	<SectionCard labelFor="signingSetting" orientation="row">
-		<svelte:fragment slot="title">Sign commits with the above SSH key</svelte:fragment>
-		<svelte:fragment slot="caption">
-			If you want GitButler to sign your commits with the SSH key we generated, then you can add
-			that key to GitHub as a signing key to have those commits verified.
-			<Link
-				target="_blank"
-				rel="noreferrer"
-				href="https://docs.gitbutler.com/features/virtual-branches/verifying-commits"
-			>
-				Learn more
-			</Link>
-		</svelte:fragment>
-		<svelte:fragment slot="actions">
-			<Toggle id="signingSetting" checked={signCommits} on:change={toggleSigningSetting} />
-		</svelte:fragment>
 	</SectionCard>
 </ContentWrapper>

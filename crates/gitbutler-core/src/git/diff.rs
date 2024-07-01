@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{collections::HashMap, str};
 
 use anyhow::{Context, Result};
@@ -7,8 +7,6 @@ use bstr::{BStr, BString, ByteSlice, ByteVec};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use super::Repository;
-use crate::git;
 use crate::id::Id;
 use crate::virtual_branches::Branch;
 
@@ -102,6 +100,22 @@ impl GitHunk {
     }
 }
 
+/// Comparison
+impl GitHunk {
+    /// integration_intersects_unapplied is used to determine if a hunk from a diff between integration and the trunk intersects with an unapplied hunk.
+    /// We want to use the new start/end for the integraiton hunk and the old start/end for the unapplied hunk.
+    pub fn integration_intersects_unapplied(
+        integration_hunk: &GitHunk,
+        unapplied_hunk: &GitHunk,
+    ) -> bool {
+        let unapplied_old_end = unapplied_hunk.old_start + unapplied_hunk.old_lines;
+        let integration_new_end = integration_hunk.new_start + integration_hunk.new_lines;
+
+        unapplied_hunk.old_start <= integration_new_end
+            && integration_hunk.new_start <= unapplied_old_end
+    }
+}
+
 // A hunk is locked when it depends on changes in commits that are in your
 // workspace. A hunk can be locked to more than one branch if it overlaps
 // with more than one committed hunk.
@@ -109,7 +123,8 @@ impl GitHunk {
 #[serde(rename_all = "camelCase")]
 pub struct HunkLock {
     pub branch_id: Id<Branch>,
-    pub commit_id: git::Oid,
+    #[serde(with = "crate::serde::oid")]
+    pub commit_id: git2::Oid,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Default)]
@@ -128,12 +143,40 @@ pub struct FileDiff {
     pub new_size_bytes: u64,
 }
 
-#[instrument(skip(repository))]
-pub fn workdir(repository: &Repository, commit_oid: &git::Oid) -> Result<DiffByPathMap> {
-    let commit = repository
+#[instrument(skip(repo))]
+pub fn workdir(repo: &git2::Repository, commit_oid: &git2::Oid) -> Result<DiffByPathMap> {
+    let commit = repo
         .find_commit(*commit_oid)
         .context("failed to find commit")?;
-    let tree = commit.tree().context("failed to find tree")?;
+    let old_tree = commit.tree().context("failed to find tree")?;
+
+    let mut workdir_index = repo.index()?;
+
+    let mut skipped_files = HashMap::new();
+    let cb = &mut |path: &Path, _matched_spec: &[u8]| -> i32 {
+        let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+        if file_size > 50_000_000 {
+            skipped_files.insert(
+                path.to_path_buf(),
+                FileDiff {
+                    old_path: None,
+                    new_path: None,
+                    hunks: Vec::new(),
+                    skipped: true,
+                    binary: true,
+                    old_size_bytes: 0,
+                    new_size_bytes: 0,
+                },
+            );
+            1 //skips the entry
+        } else {
+            0
+        }
+    };
+    workdir_index.add_all(["."], git2::IndexAddOption::DEFAULT, Some(cb))?;
+    let workdir_tree_id = workdir_index.write_tree()?;
+
+    let new_tree = repo.find_tree(workdir_tree_id)?;
 
     let mut diff_opts = git2::DiffOptions::new();
     diff_opts
@@ -144,12 +187,8 @@ pub fn workdir(repository: &Repository, commit_oid: &git::Oid) -> Result<DiffByP
         .ignore_submodules(true)
         .context_lines(3);
 
-    let mut diff = repository.diff_tree_to_workdir(Some(&tree), Some(&mut diff_opts))?;
-    let (mut diff_opts, skipped_files) = without_large_files(50_000_000, &diff, diff_opts);
-    if !skipped_files.is_empty() {
-        diff = repository.diff_tree_to_workdir(Some(&tree), Some(&mut diff_opts))?;
-    }
-    let diff_files = hunks_by_filepath(Some(repository), &diff);
+    let diff = repo.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), Some(&mut diff_opts))?;
+    let diff_files = hunks_by_filepath(Some(repo), &diff);
     diff_files.map(|mut df| {
         for (key, value) in skipped_files {
             df.insert(key, value);
@@ -159,9 +198,9 @@ pub fn workdir(repository: &Repository, commit_oid: &git::Oid) -> Result<DiffByP
 }
 
 pub fn trees(
-    repository: &Repository,
-    old_tree: &git::Tree,
-    new_tree: &git::Tree,
+    repository: &git2::Repository,
+    old_tree: &git2::Tree,
+    new_tree: &git2::Tree,
 ) -> Result<DiffByPathMap> {
     let mut diff_opts = git2::DiffOptions::new();
     diff_opts
@@ -178,39 +217,6 @@ pub fn trees(
     hunks_by_filepath(None, &diff)
 }
 
-pub fn without_large_files(
-    size_limit_bytes: u64,
-    diff: &git2::Diff,
-    mut diff_opts: git2::DiffOptions,
-) -> (git2::DiffOptions, DiffByPathMap) {
-    let mut skipped_files = HashMap::new();
-    for delta in diff.deltas() {
-        if delta.new_file().size() > size_limit_bytes {
-            if let Some(path) = delta.new_file().path() {
-                skipped_files.insert(
-                    path.to_path_buf(),
-                    FileDiff {
-                        old_path: delta.old_file().path().map(ToOwned::to_owned),
-                        new_path: delta.new_file().path().map(ToOwned::to_owned),
-                        hunks: Vec::new(),
-                        skipped: true,
-                        binary: true,
-                        old_size_bytes: delta.old_file().size(),
-                        new_size_bytes: delta.new_file().size(),
-                    },
-                );
-            }
-        } else if let Some(path) = delta.new_file().path() {
-            if let Some(path) = path.to_str() {
-                // TODO(ST): use negative pathspecs instead, but with `gitoxide` this might not even be necessary.
-                //           Currently, performance could be bad if there are thousands of pathspecs.
-                diff_opts.pathspec(path);
-            }
-        }
-    }
-    (diff_opts, skipped_files)
-}
-
 /// Transform `diff` into a mapping of `worktree-relative path -> FileDiff`, where `FileDiff` is
 /// all the diff-related information one could ask for. This is mainly to workaround `git2`
 /// which doesn't provide a format that is easy to use or hunk-based, but it's line-by-line only.
@@ -218,13 +224,17 @@ pub fn without_large_files(
 /// `repository` should be `None` if there is no reason to access the workdir, which it will do to
 /// keep the binary data in the object database, which otherwise would be lost to the system
 /// (it's not reconstructable from the delta, or it's not attempted).
-fn hunks_by_filepath(repo: Option<&Repository>, diff: &git2::Diff) -> Result<DiffByPathMap> {
+pub fn hunks_by_filepath(
+    repo: Option<&git2::Repository>,
+    diff: &git2::Diff,
+) -> Result<DiffByPathMap> {
     enum LineOrHexHash<'a> {
         Line(Cow<'a, BStr>),
         HexHashOfBinaryBlob(String),
     }
     // find all the hunks
     let mut diff_files = HashMap::new();
+    let mut err = None;
 
     diff.print(
         git2::DiffFormat::Patch,
@@ -258,11 +268,10 @@ fn hunks_by_filepath(repo: Option<&Repository>, diff: &git2::Diff) -> Result<Dif
                     {
                         if !delta.new_file().id().is_zero() && full_path.exists() {
                             let oid = repo.blob_path(full_path.as_path()).unwrap();
-                            assert_eq!(
-                                delta.new_file().id(),
-                                oid.into(),
-                                "BUG: we only store the file which is already known by the diff system, but it was different"
-                            )
+                            if delta.new_file().id() != oid {
+                                err = Some(format!("we only store the file which is already known by the diff system, but it was different: {} != {}", delta.new_file().id(), oid));
+                                return false
+                            }
                         }
                     }
                     Some(LineOrHexHash::HexHashOfBinaryBlob(delta.new_file().id().to_string()))
@@ -286,7 +295,10 @@ fn hunks_by_filepath(repo: Option<&Repository>, diff: &git2::Diff) -> Result<Dif
                                 old_size_bytes: delta.old_file().size(),
                                 new_size_bytes: delta.new_file().size(),
                         });
-                    assert_eq!(existing, None, "BUG: this only happens for file-headers, they are provided once");
+                    if existing.is_some() {
+                        err = Some(format!("Encountered an invalid internal state related to the diff: {existing:?}"));
+                        return false;
+                    }
                 }
                 Some(line) => {
                     let hunks = &mut diff_files.get_mut(file_path).expect("File header inserts the hunk-list").hunks;
@@ -332,7 +344,7 @@ fn hunks_by_filepath(repo: Option<&Repository>, diff: &git2::Diff) -> Result<Dif
             true
         },
     )
-    .context("failed to print diff")?;
+    .with_context(|| format!("failed to print diff: {err:?}"))?;
 
     for file in diff_files.values_mut() {
         if let Some(binary_hunk) = file

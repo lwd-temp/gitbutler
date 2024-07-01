@@ -1,6 +1,10 @@
 {
 	"name": "git-butler-tauri",
 	"private": true,
+	"engines": {
+		"node": ">=20.11"
+	},
+	"packageManager": "pnpm@9.2.0",
 	"scripts": {
 		"dev": "pnpm --filter @gitbutler/ui run dev",
 		"test": "pnpm --filter @gitbutler/ui run test",
@@ -16,6 +20,6 @@
 		"rustfmt": "cargo +nightly fmt -- --config-path rustfmt-nightly.toml"
 	},
 	"devDependencies": {
-		"@tauri-apps/cli": "^1.5.12"
+		"@tauri-apps/cli": "^1.5.13"
 	}
 }

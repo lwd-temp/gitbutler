@@ -1,16 +1,18 @@
 <script lang="ts">
-	import { AIService, GitAIConfigKey, KeyOption, ModelKind } from '$lib/ai/service';
-	import { OpenAIModelName, AnthropicModelName } from '$lib/ai/types';
+	import { AIService, GitAIConfigKey, KeyOption } from '$lib/ai/service';
+	import { OpenAIModelName, AnthropicModelName, ModelKind } from '$lib/ai/types';
 	import { GitConfigService } from '$lib/backend/gitConfigService';
-	import InfoMessage from '$lib/components/InfoMessage.svelte';
-	import RadioButton from '$lib/components/RadioButton.svelte';
+	import AiPromptEdit from '$lib/components/AIPromptEdit/AIPromptEdit.svelte';
 	import SectionCard from '$lib/components/SectionCard.svelte';
-	import Select from '$lib/components/Select.svelte';
-	import SelectItem from '$lib/components/SelectItem.svelte';
-	import Spacer from '$lib/components/Spacer.svelte';
-	import TextBox from '$lib/components/TextBox.svelte';
 	import WelcomeSigninAction from '$lib/components/WelcomeSigninAction.svelte';
-	import ContentWrapper from '$lib/components/settings/ContentWrapper.svelte';
+	import ContentWrapper from '$lib/settings/ContentWrapper.svelte';
+	import Section from '$lib/settings/Section.svelte';
+	import InfoMessage from '$lib/shared/InfoMessage.svelte';
+	import RadioButton from '$lib/shared/RadioButton.svelte';
+	import Select from '$lib/shared/Select.svelte';
+	import SelectItem from '$lib/shared/SelectItem.svelte';
+	import Spacer from '$lib/shared/Spacer.svelte';
+	import TextBox from '$lib/shared/TextBox.svelte';
 	import { UserService } from '$lib/stores/user';
 	import { getContext } from '$lib/utils/context';
 	import { onMount, tick } from 'svelte';
@@ -19,7 +21,6 @@
 	const aiService = getContext(AIService);
 	const userService = getContext(UserService);
 	const user = userService.user;
-
 	let initialized = false;
 
 	let modelKind: ModelKind | undefined;
@@ -30,6 +31,8 @@
 	let anthropicKey: string | undefined;
 	let anthropicModelName: AnthropicModelName | undefined;
 	let diffLengthLimit: number | undefined;
+	let ollamaEndpoint: string | undefined;
+	let ollamaModel: string | undefined;
 
 	function setConfiguration(key: GitAIConfigKey, value: string | undefined) {
 		if (!initialized) return;
@@ -48,6 +51,9 @@
 	$: setConfiguration(GitAIConfigKey.AnthropicKey, anthropicKey);
 	$: setConfiguration(GitAIConfigKey.DiffLengthLimit, diffLengthLimit?.toString());
 
+	$: setConfiguration(GitAIConfigKey.OllamaEndpoint, ollamaEndpoint);
+	$: setConfiguration(GitAIConfigKey.OllamaModelName, ollamaModel);
+
 	onMount(async () => {
 		modelKind = await aiService.getModelKind();
 
@@ -60,6 +66,9 @@
 		anthropicKey = await aiService.getAnthropicKey();
 
 		diffLengthLimit = await aiService.getDiffLengthLimit();
+
+		ollamaEndpoint = await aiService.getOllamaEndpoint();
+		ollamaModel = await aiService.getOllamaModelName();
 
 		// Ensure reactive declarations have finished running before we set initialized to true
 		await tick();
@@ -92,6 +101,10 @@
 		{
 			name: 'GPT 4 Turbo',
 			value: OpenAIModelName.GPT4Turbo
+		},
+		{
+			name: 'GPT 4 Omni',
+			value: OpenAIModelName.GPT4o
 		}
 	];
 
@@ -137,21 +150,15 @@
 			roundedBottom={false}
 			orientation="row"
 			labelFor="open-ai"
-			bottomBorder={modelKind != ModelKind.OpenAI}
+			bottomBorder={modelKind !== ModelKind.OpenAI}
 		>
 			<svelte:fragment slot="title">Open AI</svelte:fragment>
 			<svelte:fragment slot="actions">
 				<RadioButton name="modelKind" id="open-ai" value={ModelKind.OpenAI} />
 			</svelte:fragment>
 		</SectionCard>
-		{#if modelKind == ModelKind.OpenAI}
-			<SectionCard
-				hasTopRadius={false}
-				roundedTop={false}
-				roundedBottom={false}
-				orientation="row"
-				topDivider
-			>
+		{#if modelKind === ModelKind.OpenAI}
+			<SectionCard roundedTop={false} roundedBottom={false} orientation="row" topDivider>
 				<div class="inputs-group">
 					<Select
 						items={keyOptions}
@@ -160,12 +167,19 @@
 						labelId="name"
 						label="Do you want to provide your own key?"
 					>
-						<SelectItem slot="template" let:item>
+						<SelectItem
+							slot="template"
+							let:item
+							let:selected
+							{selected}
+							let:highlighted
+							{highlighted}
+						>
 							{item.name}
 						</SelectItem>
 					</Select>
 
-					{#if openAIKeyOption == KeyOption.ButlerAPI}
+					{#if openAIKeyOption === KeyOption.ButlerAPI}
 						<InfoMessage filled outlined={false} style="pop" icon="ai">
 							<svelte:fragment slot="title">
 								GitButler uses OpenAI API for commit messages and branch names
@@ -173,17 +187,24 @@
 						</InfoMessage>
 					{/if}
 
-					{#if openAIKeyOption == KeyOption.BringYourOwn}
-						<TextBox label="API Key" bind:value={openAIKey} required placeholder="sk-..." />
+					{#if openAIKeyOption === KeyOption.BringYourOwn}
+						<TextBox label="API key" bind:value={openAIKey} required placeholder="sk-..." />
 
 						<Select
 							items={openAIModelOptions}
 							bind:selectedItemId={openAIModelName}
 							itemId="value"
 							labelId="name"
-							label="Model Version"
+							label="Model version"
 						>
-							<SelectItem slot="template" let:item>
+							<SelectItem
+								slot="template"
+								let:item
+								let:selected
+								{selected}
+								let:highlighted
+								{highlighted}
+							>
 								{item.name}
 							</SelectItem>
 						</Select>
@@ -199,21 +220,15 @@
 			roundedBottom={false}
 			orientation="row"
 			labelFor="anthropic"
-			bottomBorder={modelKind != ModelKind.Anthropic}
+			bottomBorder={modelKind !== ModelKind.Anthropic}
 		>
 			<svelte:fragment slot="title">Anthropic</svelte:fragment>
 			<svelte:fragment slot="actions">
 				<RadioButton name="modelKind" id="anthropic" value={ModelKind.Anthropic} />
 			</svelte:fragment>
 		</SectionCard>
-		{#if modelKind == ModelKind.Anthropic}
-			<SectionCard
-				hasTopRadius={false}
-				roundedTop={false}
-				roundedBottom={false}
-				orientation="row"
-				topDivider
-			>
+		{#if modelKind === ModelKind.Anthropic}
+			<SectionCard roundedTop={false} roundedBottom={false} orientation="row" topDivider>
 				<div class="inputs-group">
 					<Select
 						items={keyOptions}
@@ -222,12 +237,19 @@
 						labelId="name"
 						label="Do you want to provide your own key?"
 					>
-						<SelectItem slot="template" let:item>
+						<SelectItem
+							slot="template"
+							let:item
+							let:selected
+							{selected}
+							let:highlighted
+							{highlighted}
+						>
 							{item.name}
 						</SelectItem>
 					</Select>
 
-					{#if anthropicKeyOption == KeyOption.ButlerAPI}
+					{#if anthropicKeyOption === KeyOption.ButlerAPI}
 						<InfoMessage filled outlined={false} style="pop" icon="ai">
 							<svelte:fragment slot="title">
 								GitButler uses Anthropic API for commit messages and branch names
@@ -235,9 +257,9 @@
 						</InfoMessage>
 					{/if}
 
-					{#if anthropicKeyOption == KeyOption.BringYourOwn}
+					{#if anthropicKeyOption === KeyOption.BringYourOwn}
 						<TextBox
-							label="API Key"
+							label="API key"
 							bind:value={anthropicKey}
 							required
 							placeholder="sk-ant-api03-..."
@@ -248,9 +270,16 @@
 							bind:selectedItemId={anthropicModelName}
 							itemId="value"
 							labelId="name"
-							label="Model Version"
+							label="Model version"
 						>
-							<SelectItem slot="template" let:item>
+							<SelectItem
+								slot="template"
+								let:item
+								let:selected
+								{selected}
+								let:highlighted
+								{highlighted}
+							>
 								{item.name}
 							</SelectItem>
 						</Select>
@@ -261,15 +290,31 @@
 			</SectionCard>
 		{/if}
 
-		<SectionCard roundedTop={false} orientation="row" disabled={true}>
-			<svelte:fragment slot="title">Custom Endpoint</svelte:fragment>
+		<SectionCard
+			roundedTop={false}
+			roundedBottom={modelKind !== ModelKind.Ollama}
+			orientation="row"
+			labelFor="ollama"
+			bottomBorder={modelKind !== ModelKind.Ollama}
+		>
+			<svelte:fragment slot="title">Ollama 🦙</svelte:fragment>
 			<svelte:fragment slot="actions">
-				<RadioButton disabled={true} name="modelKind" />
+				<RadioButton name="modelKind" id="ollama" value={ModelKind.Ollama} />
 			</svelte:fragment>
-			<svelte:fragment slot="caption"
-				>Support for custom AI endpoints is coming soon!</svelte:fragment
-			>
 		</SectionCard>
+		{#if modelKind === ModelKind.Ollama}
+			<SectionCard roundedTop={false} orientation="row" topDivider>
+				<div class="inputs-group">
+					<TextBox
+						label="Endpoint"
+						bind:value={ollamaEndpoint}
+						placeholder="http://127.0.0.1:11434"
+					/>
+
+					<TextBox label="Model" bind:value={ollamaModel} placeholder="llama3" />
+				</div>
+			</SectionCard>
+		{/if}
 	</form>
 
 	<Spacer />
@@ -294,17 +339,43 @@
 		</svelte:fragment>
 	</SectionCard>
 
-	<style>
-		.ai-settings__text {
-			color: var(--clr-text-2);
-			margin-bottom: var(--size-12);
-		}
+	<Spacer />
 
-		.inputs-group {
-			display: flex;
-			flex-direction: column;
-			gap: var(--size-16);
-			width: 100%;
-		}
-	</style>
+	<Section>
+		<svelte:fragment slot="title">Custom AI prompts</svelte:fragment>
+		<svelte:fragment slot="description">
+			GitButler's AI assistant generates commit messages and branch names. Use default prompts or
+			create your own. Assign prompts in the <button
+				class="link"
+				on:click={() => console.log('got to project settings')}>project settings</button
+			>.
+		</svelte:fragment>
+
+		<div class="prompt-groups">
+			<AiPromptEdit promptUse="commits" />
+			<Spacer margin={12} />
+			<AiPromptEdit promptUse="branches" />
+		</div>
+	</Section>
 </ContentWrapper>
+
+<style>
+	.ai-settings__text {
+		color: var(--clr-text-2);
+		margin-bottom: 12px;
+	}
+
+	.inputs-group {
+		display: flex;
+		flex-direction: column;
+		gap: 16px;
+		width: 100%;
+	}
+
+	.prompt-groups {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		margin-top: 16px;
+	}
+</style>

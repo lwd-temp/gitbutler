@@ -1,6 +1,7 @@
-import { Branch, VirtualBranches } from './types';
+import { Branch, Commit, RemoteCommit, VirtualBranches, commitCompare } from './types';
 import { invoke, listen } from '$lib/backend/ipc';
 import { observableToStore } from '$lib/rxjs/store';
+import { getRemoteBranchData } from '$lib/stores/remoteBranches';
 import * as toasts from '$lib/utils/toasts';
 import { plainToInstance } from 'class-transformer';
 import {
@@ -48,12 +49,17 @@ export class VirtualBranchService {
 					: of([])
 			),
 			tap((branches) => {
+				for (let i = 0; i < branches.length; i++) {
+					const branch = branches[i];
+					const commits = branch.commits;
+					linkAsParentChildren(commits);
+				}
+			}),
+			tap((branches) => {
 				branches.forEach((branch) => {
 					branch.files.sort((a) => (a.conflicted ? -1 : 0));
-					branch.isMergeable = invoke<boolean>('can_apply_virtual_branch', {
-						projectId: projectId,
-						branchId: branch.id
-					});
+					// This is always true now
+					branch.isMergeable = Promise.resolve(true);
 				});
 				this.fresh$.next(); // Notification for fresh reload
 			}),
@@ -65,8 +71,40 @@ export class VirtualBranchService {
 			map((branches) => branches?.filter((b) => !b.active))
 		);
 
+		// We need upstream data to be part of the branch without delay since the way we render
+		// commits depends on it.
+		// TODO: Move this async behavior into the rust code.
 		this.activeBranches$ = this.branches$.pipe(
-			map((branches) => branches?.filter((b) => b.active))
+			// Disabling lint since `switchMap` does not work with async functions.
+			// eslint-disable-next-line @typescript-eslint/promise-function-async
+			switchMap((branches) => {
+				if (!branches) return of();
+				return Promise.all(
+					branches
+						.filter((b) => b.active)
+						.map(async (b) => {
+							const upstreamName = b.upstream?.name;
+							if (upstreamName) {
+								try {
+									const data = await getRemoteBranchData(projectId, upstreamName);
+									const commits = data.commits;
+									commits.forEach((uc) => {
+										const match = b.commits.find((c) => commitCompare(uc, c));
+										if (match) {
+											match.relatedTo = uc;
+											uc.relatedTo = match;
+										}
+									});
+									linkAsParentChildren(commits);
+									b.upstreamData = data;
+								} catch (e: any) {
+									console.log(e);
+								}
+							}
+							return b;
+						})
+				);
+			})
 		);
 
 		[this.activeBranches, this.activeBranchesError] = observableToStore(this.activeBranches$);
@@ -94,7 +132,16 @@ export class VirtualBranchService {
 		return await firstValueFrom(
 			this.branches$.pipe(
 				timeout(10000),
-				map((branches) => branches?.find((b) => b.id == branchId && b.upstream))
+				map((branches) => branches?.find((b) => b.id === branchId && b.upstream))
+			)
+		);
+	}
+
+	async getByUpstreamSha(upstreamSha: string) {
+		return await firstValueFrom(
+			this.branches$.pipe(
+				timeout(10000),
+				map((branches) => branches?.find((b) => b.upstream?.sha === upstreamSha))
 			)
 		);
 	}
@@ -109,4 +156,20 @@ function subscribeToVirtualBranches(projectId: string, callback: (branches: Bran
 export async function listVirtualBranches(params: { projectId: string }): Promise<Branch[]> {
 	return plainToInstance(VirtualBranches, await invoke<any>('list_virtual_branches', params))
 		.branches;
+}
+
+function linkAsParentChildren(commits: Commit[] | RemoteCommit[]) {
+	for (let j = 0; j < commits.length; j++) {
+		const commit = commits[j];
+		if (j === 0) {
+			commit.next = undefined;
+		} else {
+			const child = commits[j - 1];
+			if (child instanceof Commit) commit.next = child;
+			if (child instanceof RemoteCommit) commit.next = child;
+		}
+		if (j !== commits.length - 1) {
+			commit.prev = commits[j + 1];
+		}
+	}
 }

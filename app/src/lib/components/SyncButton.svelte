@@ -1,34 +1,30 @@
 <script lang="ts">
-	import { Project } from '$lib/backend/projects';
-	import { syncToCloud } from '$lib/backend/sync';
-	import Tag from '$lib/components/Tag.svelte';
-	import TimeAgo from '$lib/components/TimeAgo.svelte';
 	import { GitHubService } from '$lib/github/service';
+	import Button from '$lib/shared/Button.svelte';
+	import TimeAgo from '$lib/shared/TimeAgo.svelte';
 	import { getContext } from '$lib/utils/context';
 	import { BaseBranchService } from '$lib/vbranches/baseBranch';
 
-	const project = getContext(Project);
 	const githubService = getContext(GitHubService);
 	const baseBranchService = getContext(BaseBranchService);
 	const baseBranch = baseBranchService.base;
 
 	$: baseServiceBusy$ = baseBranchService.busy$;
-	$: cloudEnabled = project.api?.sync || false;
 </script>
 
-<Tag
+<Button
+	size="tag"
 	clickable
 	reversedDirection
 	style="ghost"
-	kind="solid"
+	outline
 	icon="update-small"
 	help="Last fetch from upstream"
 	loading={$baseServiceBusy$}
 	on:mousedown={async (e) => {
 		e.preventDefault();
 		e.stopPropagation();
-		if (cloudEnabled) syncToCloud(project.id); // don't wait for this
-		await baseBranchService.fetchFromTarget('modal');
+		await baseBranchService.fetchFromRemotes('modal');
 		if (githubService.isEnabled) {
 			await githubService.reload();
 		}
@@ -39,10 +35,10 @@
 	{:else if $baseBranch?.lastFetched}
 		<TimeAgo date={$baseBranch?.lastFetched} />
 	{/if}
-</Tag>
+</Button>
 
 <style lang="postcss">
 	.sync-btn__busy-label {
-		padding-left: var(--size-4);
+		padding-left: 4px;
 	}
 </style>

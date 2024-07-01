@@ -16,12 +16,13 @@
 	export let noBorder = false;
 	export let labelFor = '';
 	export let disabled = false;
-
-	const SLOTS = $$props.$$slots;
+	export let clickable = false;
 
 	const dispatch = createEventDispatcher<{ hover: boolean }>();
 </script>
 
+<!-- svelte-ignore a11y_click_events_have_key_events -->
+<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <label
 	for={labelFor}
 	class="section-card"
@@ -33,28 +34,29 @@
 	class:top-divider={topDivider}
 	class:bottom-border={bottomBorder}
 	class:no-border={noBorder}
-	class:loading={background == 'loading'}
-	class:success={background == 'success'}
-	class:error={background == 'error'}
-	class:clickable={labelFor !== ''}
+	class:loading={background === 'loading'}
+	class:success={background === 'success'}
+	class:error={background === 'error'}
+	class:clickable={labelFor !== '' || clickable}
 	class:disabled
+	on:click
 	on:mouseenter={() => dispatch('hover', true)}
 	on:mouseleave={() => dispatch('hover', false)}
 >
-	{#if SLOTS.iconSide}
+	{#if $$slots.iconSide}
 		<div class="section-card__icon-side">
 			<slot name="iconSide" />
 		</div>
 	{/if}
 
-	{#if SLOTS.title || SLOTS.caption}
+	{#if $$slots.title || $$slots.caption}
 		<div class="section-card__content">
-			{#if SLOTS.title}
+			{#if $$slots.title}
 				<h3 class="text-base-15 text-bold section-card__title">
 					<slot name="title" />
 				</h3>
 			{/if}
-			{#if SLOTS.caption}
+			{#if $$slots.caption}
 				<p class="text-base-body-12 section-card__text">
 					<slot name="caption" />
 				</p>
@@ -64,19 +66,19 @@
 
 	<slot />
 
-	{#if SLOTS.actions}
+	{#if $$slots.actions}
 		<div class="section-card__actions">
 			<slot name="actions" />
 		</div>
 	{/if}
 </label>
 
-<style lang="post-css">
+<style lang="postcss">
 	.section-card {
 		position: relative;
 		display: flex;
-		gap: var(--size-16);
-		padding: var(--size-16);
+		gap: 16px;
+		padding: 16px;
 		border-left-width: 1px;
 		border-right-width: 1px;
 		border-color: var(--clr-border-2);
@@ -100,14 +102,14 @@
 		background: var(--clr-theme-warn-bg);
 	}
 	.extra-padding {
-		padding: var(--size-20);
+		padding: 20px;
 	}
 
 	.section-card__content {
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		gap: var(--size-8);
+		gap: 8px;
 		user-select: text;
 	}
 
@@ -126,6 +128,11 @@
 
 	.section-card__actions {
 		display: flex;
+	}
+
+	.section-card__icon-side {
+		display: flex;
+		align-items: center;
 	}
 
 	/* MODIFIERS */
@@ -150,8 +157,7 @@
 			display: block;
 			width: 100%;
 			height: 1px;
-			background-color: var(--clr-border-2);
-			opacity: 0.5;
+			background-color: var(--clr-border-3);
 		}
 	}
 

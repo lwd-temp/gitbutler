@@ -13,11 +13,9 @@
     clippy::too_many_lines
 )]
 
-use std::path::PathBuf;
-
-use gitbutler_core::{assets, database, git, storage};
+use gitbutler_core::{assets, git, storage};
 use gitbutler_tauri::{
-    app, askpass, commands, deltas, github, keys, logs, menu, projects, sessions, undo, users,
+    app, askpass, commands, config, github, keys, logs, menu, projects, remotes, undo, users,
     virtual_branches, watcher, zip,
 };
 use tauri::{generate_context, Manager};
@@ -106,26 +104,16 @@ fn main() {
                     let projects_controller = gitbutler_core::projects::Controller::new(
                         app_data_dir.clone(),
                         projects_storage_controller.clone(),
-                        users_controller.clone(),
                         Some(watcher_controller.clone())
                     );
                     app_handle.manage(projects_controller.clone());
 
                     app_handle.manage(assets::Proxy::new(app_cache_dir.join("images")));
 
-                    let database_controller = database::Database::open_in_directory(&app_data_dir).expect("failed to open database");
-                    app_handle.manage(database_controller.clone());
-
                     let zipper = gitbutler_core::zip::Zipper::new(&app_cache_dir);
                     app_handle.manage(zipper.clone());
 
                     app_handle.manage(gitbutler_core::zip::Controller::new(app_data_dir.clone(), app_log_dir.clone(), zipper.clone(), projects_controller.clone()));
-
-                    let deltas_database_controller = gitbutler_core::deltas::database::Database::new(database_controller.clone());
-                    app_handle.manage(deltas_database_controller.clone());
-
-                    let deltas_controller = gitbutler_core::deltas::Controller::new(deltas_database_controller.clone());
-                    app_handle.manage(deltas_controller);
 
                     let keys_storage_controller = gitbutler_core::keys::storage::Storage::new(storage_controller.clone());
                     app_handle.manage(keys_storage_controller.clone());
@@ -135,33 +123,23 @@ fn main() {
 
                     let git_credentials_controller = git::credentials::Helper::new(
                         keys_controller.clone(),
-                        users_controller.clone(),
-                        std::env::var_os("HOME").map(PathBuf::from)
                     );
                     app_handle.manage(git_credentials_controller.clone());
 
                     app_handle.manage(gitbutler_core::virtual_branches::controller::Controller::new(
                         projects_controller.clone(),
                         users_controller.clone(),
-                        keys_controller.clone(),
                         git_credentials_controller.clone(),
                     ));
 
-                    let sessions_database_controller = gitbutler_core::sessions::database::Database::new(database_controller.clone());
-                    app_handle.manage(sessions_database_controller.clone());
-
-                    app_handle.manage(gitbutler_core::sessions::Controller::new(
-                        app_data_dir.clone(),
-                        sessions_database_controller.clone(),
+                    let remotes_controller = gitbutler_core::remotes::controller::Controller::new(
                         projects_controller.clone(),
-                        users_controller.clone(),
-                    ));
+                    );
+
+                    app_handle.manage(remotes_controller.clone());
 
                     let app = app::App::new(
-                        app_data_dir,
                         projects_controller,
-                        users_controller,
-                        sessions_database_controller,
                     );
 
                     app_handle.manage(app);
@@ -174,14 +152,12 @@ fn main() {
                 .plugin(tauri_plugin_store::Builder::default().build())
                 .plugin(log.build())
                 .invoke_handler(tauri::generate_handler![
-                    commands::list_session_files,
                     commands::git_remote_branches,
                     commands::git_head,
                     commands::delete_all_data,
                     commands::mark_resolved,
                     commands::git_set_global_config,
                     commands::git_get_global_config,
-                    commands::project_flush_and_push,
                     commands::git_test_push,
                     commands::git_test_fetch,
                     commands::git_index_size,
@@ -199,28 +175,24 @@ fn main() {
                     projects::commands::set_project_active,
                     projects::commands::git_get_local_config,
                     projects::commands::git_set_local_config,
-                    sessions::commands::list_sessions,
-                    deltas::commands::list_deltas,
+                    projects::commands::check_signing_settings,
                     virtual_branches::commands::list_virtual_branches,
                     virtual_branches::commands::create_virtual_branch,
                     virtual_branches::commands::commit_virtual_branch,
                     virtual_branches::commands::get_base_branch_data,
                     virtual_branches::commands::set_base_branch,
                     virtual_branches::commands::update_base_branch,
-                    virtual_branches::commands::merge_virtual_branch_upstream,
+                    virtual_branches::commands::integrate_upstream_commits,
                     virtual_branches::commands::update_virtual_branch,
                     virtual_branches::commands::delete_virtual_branch,
-                    virtual_branches::commands::apply_branch,
-                    virtual_branches::commands::unapply_branch,
+                    virtual_branches::commands::convert_to_real_branch,
                     virtual_branches::commands::unapply_ownership,
                     virtual_branches::commands::reset_files,
                     virtual_branches::commands::push_virtual_branch,
                     virtual_branches::commands::create_virtual_branch_from_branch,
-                    virtual_branches::commands::can_apply_virtual_branch,
                     virtual_branches::commands::can_apply_remote_branch,
                     virtual_branches::commands::list_remote_commit_files,
                     virtual_branches::commands::reset_virtual_branch,
-                    virtual_branches::commands::cherry_pick_onto_virtual_branch,
                     virtual_branches::commands::amend_virtual_branch,
                     virtual_branches::commands::move_commit_file,
                     virtual_branches::commands::undo_commit,
@@ -230,18 +202,35 @@ fn main() {
                     virtual_branches::commands::list_remote_branches,
                     virtual_branches::commands::get_remote_branch_data,
                     virtual_branches::commands::squash_branch_commit,
-                    virtual_branches::commands::fetch_from_target,
+                    virtual_branches::commands::fetch_from_remotes,
                     virtual_branches::commands::move_commit,
                     undo::list_snapshots,
                     undo::restore_snapshot,
+                    undo::snapshot_diff,
+                    config::get_gb_config,
+                    config::set_gb_config,
                     menu::menu_item_set_enabled,
+                    menu::resolve_vscode_variant,
                     keys::commands::get_public_key,
                     github::commands::init_device_oauth,
                     github::commands::check_auth_status,
                     askpass::commands::submit_prompt_response,
+                    remotes::list_remotes,
+                    remotes::add_remote
                 ])
                 .menu(menu::build(tauri_context.package_info()))
                 .on_menu_event(|event|menu::handle_event(&event))
+                .on_window_event(|event| {
+                    if let tauri::WindowEvent::Focused(focused) = event.event() {
+                        if *focused {
+                            tokio::task::spawn(async move {
+                                let _ = event.window().app_handle()
+                                    .state::<watcher::Watchers>()
+                                    .flush().await;
+                            });
+                        }
+                    }
+                })
                 .build(tauri_context)
                 .expect("Failed to build tauri app")
                 .run(|app_handle, event| {

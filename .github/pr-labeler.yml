@@ -1,0 +1,9 @@
+# https://github.com/actions/labeler#basic-examples
+
+rust:
+- changed-files:
+  - any-glob-to-any-file: crates/**/*
+
+svelte:
+- changed-files:
+  - any-glob-to-any-file: app/**/*

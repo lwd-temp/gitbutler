@@ -1,0 +1,15 @@
+{
+	"eslint.useFlatConfig": true,
+	"eslint.validate": ["svelte"],
+	"eslint.workingDirectories": ["app"],
+	"svelte.enable-ts-plugin": true,
+	"prettier.configPath": "app/.prettierrc.js",
+	"prettier.useEditorConfig": false,
+	"editor.defaultFormatter": "esbenp.prettier-vscode",
+	"[rust]": {
+		"editor.defaultFormatter": "rust-lang.rust-analyzer"
+	},
+	"rust-analyzer.check.command": "clippy",
+	"rust-analyzer.check.allTargets": true,
+	"rust-analyzer.check.features": "all"
+}

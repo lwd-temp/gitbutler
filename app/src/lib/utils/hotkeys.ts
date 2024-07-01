@@ -1,19 +1,45 @@
-export async function on(combo: string, callback: (event: KeyboardEvent) => void) {
-	const comboContainsControlKeys =
-		combo.includes('Meta') || combo.includes('Alt') || combo.includes('Ctrl');
+import { createKeybindingsHandler } from 'tinykeys';
 
-	return await import('tinykeys').then(({ tinykeys }) =>
-		tinykeys(window, {
-			[combo]: (event) => {
-				const target = event.target as HTMLElement;
-				const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
-				if (isInput && !comboContainsControlKeys) return;
+interface KeybindDefinitions {
+	[combo: string]: (event: KeyboardEvent) => void;
+}
 
-				event.preventDefault();
-				event.stopPropagation();
+export enum KeyName {
+	Space = ' ',
+	Meta = 'Meta',
+	Alt = 'Alt',
+	Ctrl = 'Ctrl',
+	Enter = 'Enter',
+	Escape = 'Escape',
+	Tab = 'Tab',
+	Up = 'ArrowUp',
+	Down = 'ArrowDown',
+	Left = 'ArrowLeft',
+	Right = 'ArrowRight',
+	Delete = 'Backspace'
+}
 
-				callback(event);
+export function createKeybind(keybinds: KeybindDefinitions) {
+	const keys: KeybindDefinitions = {
+		// Ignore backspace keydown events always
+		Backspace: () => {}
+	};
+
+	for (const [combo, callback] of Object.entries(keybinds)) {
+		keys[combo] = (event: KeyboardEvent) => {
+			if (
+				event.repeat ||
+				event.target instanceof HTMLInputElement ||
+				event.target instanceof HTMLTextAreaElement
+			) {
+				return;
 			}
-		})
-	);
+
+			event.preventDefault();
+
+			callback(event);
+		};
+	}
+
+	return createKeybindingsHandler(keys);
 }

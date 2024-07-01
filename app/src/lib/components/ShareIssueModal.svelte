@@ -1,12 +1,12 @@
 <script lang="ts">
-	import TextArea from './TextArea.svelte';
-	import TextBox from './TextBox.svelte';
+	import TextArea from '../shared/TextArea.svelte';
+	import TextBox from '../shared/TextBox.svelte';
 	import { HttpClient } from '$lib/backend/httpClient';
 	import { invoke, listen } from '$lib/backend/ipc';
 	import * as zip from '$lib/backend/zip';
-	import Button from '$lib/components/Button.svelte';
-	import Checkbox from '$lib/components/Checkbox.svelte';
-	import Modal from '$lib/components/Modal.svelte';
+	import Button from '$lib/shared/Button.svelte';
+	import Checkbox from '$lib/shared/Checkbox.svelte';
+	import Modal from '$lib/shared/Modal.svelte';
 	import { User } from '$lib/stores/user';
 	import { getContext, getContextStore } from '$lib/utils/context';
 	import * as toasts from '$lib/utils/toasts';
@@ -154,12 +154,7 @@
 	});
 </script>
 
-<Modal
-	bind:this={modal}
-	on:close={() => close()}
-	on:submit={async () => await submit()}
-	title="Share debug data with GitButler team for review"
->
+<Modal bind:this={modal} onclose={close} title="Share debug data with GitButler team for review">
 	<div class="content-wrapper">
 		<p class="content-wrapper__help-text text-base-body-13">
 			If you are having trouble, please share your project and logs with the GitButler team. We will
@@ -187,6 +182,7 @@
 			spellcheck
 			id="comments"
 			rows={6}
+			maxHeight={400}
 			bind:value={messageInputValue}
 		/>
 
@@ -218,23 +214,25 @@
 		</div>
 	</div>
 
-	<svelte:fragment slot="controls">
-		<Button style="ghost" kind="solid" type="reset" on:click={close}>Close</Button>
-		<Button style="pop" kind="solid" type="submit">Share with GitButler</Button>
-	</svelte:fragment>
+	{#snippet controls(close)}
+		<Button style="ghost" outline type="reset" on:click={close}>Close</Button>
+		<Button style="pop" kind="solid" type="submit" on:click={async () => await submit()}>
+			Share with GitButler
+		</Button>
+	{/snippet}
 </Modal>
 
 <style>
 	.content-wrapper {
 		display: flex;
 		flex-direction: column;
-		gap: 1rem;
+		gap: 16px;
 	}
 
 	.content-wrapper__section {
 		display: flex;
 		flex-direction: column;
-		gap: var(--size-8);
+		gap: 8px;
 	}
 
 	.content-wrapper__help-text {
@@ -244,12 +242,12 @@
 	.content-wrapper__checkbox-group {
 		display: flex;
 		flex-direction: column;
-		gap: var(--size-10);
+		gap: 10px;
 	}
 
 	.content-wrapper__checkbox {
 		display: flex;
 		align-items: center;
-		gap: var(--size-10);
+		gap: 10px;
 	}
 </style>

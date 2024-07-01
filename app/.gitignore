@@ -21,3 +21,8 @@ vite.config.ts.timestamp-*
 
 # Written to disk when using `act`
 .pnpm-store
+
+# playwright
+test-results*
+playwright-report
+*storybook.log

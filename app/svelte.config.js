@@ -1,5 +1,5 @@
 import staticAdapter from '@sveltejs/adapter-static';
-import { vitePreprocess } from '@sveltejs/kit/vite';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 
 /** @type {import('@sveltejs/kit').Config} */
 const config = {
@@ -13,7 +13,10 @@ const config = {
 			strict: false
 		})
 	},
-	compilerOptions: { css: 'injected' }
+	compilerOptions: {
+		css: 'injected',
+		enableSourcemap: true
+	}
 };
 
 export default config;

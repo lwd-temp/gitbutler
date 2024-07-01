@@ -1,11 +1,11 @@
 <script lang="ts">
-	import Button from './Button.svelte';
-	import InfoMessage from './InfoMessage.svelte';
-	import Select from './Select.svelte';
+	import InfoMessage from '../shared/InfoMessage.svelte';
+	import Select from '../shared/Select.svelte';
 	import { Project } from '$lib/backend/projects';
 	import SectionCard from '$lib/components/SectionCard.svelte';
-	import SelectItem from '$lib/components/SelectItem.svelte';
-	import Section from '$lib/components/settings/Section.svelte';
+	import Section from '$lib/settings/Section.svelte';
+	import Button from '$lib/shared/Button.svelte';
+	import SelectItem from '$lib/shared/SelectItem.svelte';
 	import { getContext, getContextStore } from '$lib/utils/context';
 	import { getRemoteBranches } from '$lib/vbranches/baseBranch';
 	import { BranchController } from '$lib/vbranches/branchController';
@@ -76,7 +76,14 @@
 					wide={true}
 					label="Current target branch"
 				>
-					<SelectItem slot="template" let:item let:selected {selected}>
+					<SelectItem
+						slot="template"
+						let:item
+						let:selected
+						{selected}
+						let:highlighted
+						{highlighted}
+					>
 						{item.name}
 					</SelectItem>
 				</Select>
@@ -91,7 +98,14 @@
 						disabled={targetChangeDisabled}
 						label="Create branches on remote"
 					>
-						<SelectItem slot="template" let:item let:selected {selected}>
+						<SelectItem
+							slot="template"
+							let:item
+							let:selected
+							{selected}
+							let:highlighted
+							{highlighted}
+						>
 							{item.name}
 						</SelectItem>
 					</Select>
@@ -100,7 +114,7 @@
 				{#if $activeBranches && targetChangeDisabled}
 					<InfoMessage filled outlined={false} icon="info">
 						<svelte:fragment slot="content">
-							You have {$activeBranches.length == 1
+							You have {$activeBranches.length === 1
 								? '1 active branch'
 								: `${$activeBranches.length} active branches`} in your workspace. Please clear the workspace
 							before switching the base branch.
@@ -110,12 +124,12 @@
 					<Button
 						size="cta"
 						style="ghost"
-						kind="solid"
+						outline
 						on:click={onSetBaseBranchClick}
 						id="set-base-branch"
 						loading={isSwitching}
-						disabled={(selectedBranch.name == $baseBranch.branchName &&
-							selectedRemote.name == $baseBranch.actualPushRemoteName()) ||
+						disabled={(selectedBranch.name === $baseBranch.branchName &&
+							selectedRemote.name === $baseBranch.actualPushRemoteName()) ||
 							targetChangeDisabled}
 					>
 						{isSwitching ? 'Switching branches...' : 'Update configuration'}

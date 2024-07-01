@@ -1,7 +1,11 @@
-use std::path::PathBuf;
+use std::str::FromStr;
+use std::{path::PathBuf, vec};
 
-use crate::error::{AnyhowContextExt, Code, Context, ErrorWithContext};
-use crate::{error, keys, project_repository, projects, users};
+use anyhow::Context;
+
+use crate::{keys, project_repository, projects};
+
+use super::Url;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SshCredential {
@@ -71,8 +75,6 @@ impl From<Credential> for git2::RemoteCallbacks<'_> {
 #[derive(Clone)]
 pub struct Helper {
     keys: keys::Controller,
-    users: users::Controller,
-    home_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,52 +84,30 @@ pub enum HelpError {
     #[error("failed to convert url: {0}")]
     UrlConvertError(#[from] super::ConvertError),
     #[error(transparent)]
-    Git(#[from] super::Error),
+    Git(#[from] git2::Error),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
-impl ErrorWithContext for HelpError {
-    fn context(&self) -> Option<Context> {
-        Some(match self {
-            HelpError::NoUrlSet => {
-                error::Context::new_static(Code::ProjectGitRemote, "no url set for remote")
-            }
-            HelpError::UrlConvertError(_) => Code::ProjectGitRemote.into(),
-            HelpError::Git(_) => return None,
-            HelpError::Other(error) => return error.custom_context_or_root_cause().into(),
-        })
-    }
-}
-
 impl Helper {
-    pub fn new(
-        keys: keys::Controller,
-        users: users::Controller,
-        home_dir: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            keys,
-            users,
-            home_dir,
-        }
+    pub fn new(keys: keys::Controller) -> Self {
+        Self { keys }
     }
 
     pub fn from_path(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let keys = keys::Controller::from_path(&path);
-        let users = users::Controller::from_path(path);
-        let home_dir = std::env::var_os("HOME").map(PathBuf::from);
-        Self::new(keys, users, home_dir)
+        let keys = keys::Controller::from_path(path);
+        Self::new(keys)
     }
 
     pub fn help<'a>(
         &'a self,
         project_repository: &'a project_repository::Repository,
         remote_name: &str,
-    ) -> Result<Vec<(super::Remote, Vec<Credential>)>, HelpError> {
-        let remote = project_repository.git_repository.find_remote(remote_name)?;
-        let remote_url = remote.url()?.ok_or(HelpError::NoUrlSet)?;
+    ) -> Result<Vec<(git2::Remote, Vec<Credential>)>, HelpError> {
+        let remote = project_repository.repo().find_remote(remote_name)?;
+        let remote_url = Url::from_str(remote.url().ok_or(HelpError::NoUrlSet)?)
+            .context("failed to parse remote url")?;
 
         // if file, no auth needed.
         if remote_url.scheme == super::Scheme::File {
@@ -140,7 +120,9 @@ impl Helper {
                     Ok(remote)
                 } else {
                     let ssh_url = remote_url.as_ssh()?;
-                    project_repository.git_repository.remote_anonymous(&ssh_url)
+                    project_repository
+                        .repo()
+                        .remote_anonymous(&ssh_url.to_string())
                 }?;
 
                 Ok(vec![(
@@ -156,7 +138,7 @@ impl Helper {
                     Ok(remote)
                 } else {
                     let url = remote_url.as_https()?;
-                    project_repository.git_repository.remote_anonymous(&url)
+                    project_repository.repo().remote_anonymous(&url.to_string())
                 }?;
                 let flow = Self::https_flow(project_repository, &remote_url)?
                     .into_iter()
@@ -167,34 +149,30 @@ impl Helper {
             projects::AuthKey::Generated => {
                 let generated_flow = self.generated_flow(remote, project_repository)?;
 
-                let remote = project_repository.git_repository.find_remote(remote_name)?;
-                let default_flow = self.default_flow(remote, project_repository)?;
-
-                Ok(vec![generated_flow, default_flow]
-                    .into_iter()
-                    .flatten()
-                    .collect())
+                Ok(vec![generated_flow].into_iter().flatten().collect())
             }
-            projects::AuthKey::Default => self.default_flow(remote, project_repository),
             projects::AuthKey::SystemExecutable => {
                 tracing::error!("WARNING: FIXME: this codepath should NEVER be hit. Something is seriously wrong.");
-                self.default_flow(remote, project_repository)
+                Ok(vec![])
             }
         }
     }
 
     fn generated_flow<'a>(
         &'a self,
-        remote: super::Remote<'a>,
+        remote: git2::Remote<'a>,
         project_repository: &'a project_repository::Repository,
-    ) -> Result<Vec<(super::Remote, Vec<Credential>)>, HelpError> {
-        let remote_url = remote.url()?.ok_or(HelpError::NoUrlSet)?;
+    ) -> Result<Vec<(git2::Remote, Vec<Credential>)>, HelpError> {
+        let remote_url = Url::from_str(remote.url().ok_or(HelpError::NoUrlSet)?)
+            .context("failed to parse remote url")?;
 
         let ssh_remote = if remote_url.scheme == super::Scheme::Ssh {
             Ok(remote)
         } else {
             let ssh_url = remote_url.as_ssh()?;
-            project_repository.git_repository.remote_anonymous(&ssh_url)
+            project_repository
+                .repo()
+                .remote_anonymous(&ssh_url.to_string())
         }?;
 
         let key = self.keys.get_or_create()?;
@@ -204,135 +182,6 @@ impl Helper {
         )])
     }
 
-    fn default_flow<'a>(
-        &'a self,
-        remote: super::Remote<'a>,
-        project_repository: &'a project_repository::Repository,
-    ) -> Result<Vec<(super::Remote, Vec<Credential>)>, HelpError> {
-        let remote_url = remote.url()?.ok_or(HelpError::NoUrlSet)?;
-
-        // is github is authenticated, only try github.
-        if remote_url.is_github() {
-            if let Some(github_access_token) = self
-                .users
-                .get_user()?
-                .and_then(|user| user.github_access_token)
-            {
-                let https_remote = if remote_url.scheme == super::Scheme::Https {
-                    Ok(remote)
-                } else {
-                    let url = remote_url.as_https()?;
-                    project_repository.git_repository.remote_anonymous(&url)
-                }?;
-                return Ok(vec![(
-                    https_remote,
-                    vec![Credential::Https(HttpsCredential::GitHubToken(
-                        github_access_token,
-                    ))],
-                )]);
-            }
-        }
-
-        match remote_url.scheme {
-            super::Scheme::Https => {
-                let mut flow = vec![];
-
-                let https_flow = Self::https_flow(project_repository, &remote_url)?
-                    .into_iter()
-                    .map(Credential::Https)
-                    .collect::<Vec<_>>();
-
-                if !https_flow.is_empty() {
-                    flow.push((remote, https_flow));
-                }
-
-                if let Ok(ssh_url) = remote_url.as_ssh() {
-                    let ssh_flow = self
-                        .ssh_flow()?
-                        .into_iter()
-                        .map(Credential::Ssh)
-                        .collect::<Vec<_>>();
-                    if !ssh_flow.is_empty() {
-                        flow.push((
-                            project_repository
-                                .git_repository
-                                .remote_anonymous(&ssh_url)?,
-                            ssh_flow,
-                        ));
-                    }
-                }
-
-                Ok(flow)
-            }
-            super::Scheme::Ssh => {
-                let mut flow = vec![];
-
-                let ssh_flow = self
-                    .ssh_flow()?
-                    .into_iter()
-                    .map(Credential::Ssh)
-                    .collect::<Vec<_>>();
-                if !ssh_flow.is_empty() {
-                    flow.push((remote, ssh_flow));
-                }
-
-                if let Ok(https_url) = remote_url.as_https() {
-                    let https_flow = Self::https_flow(project_repository, &https_url)?
-                        .into_iter()
-                        .map(Credential::Https)
-                        .collect::<Vec<_>>();
-                    if !https_flow.is_empty() {
-                        flow.push((
-                            project_repository
-                                .git_repository
-                                .remote_anonymous(&https_url)?,
-                            https_flow,
-                        ));
-                    }
-                }
-
-                Ok(flow)
-            }
-            _ => {
-                let mut flow = vec![];
-
-                if let Ok(https_url) = remote_url.as_https() {
-                    let https_flow = Self::https_flow(project_repository, &https_url)?
-                        .into_iter()
-                        .map(Credential::Https)
-                        .collect::<Vec<_>>();
-
-                    if !https_flow.is_empty() {
-                        flow.push((
-                            project_repository
-                                .git_repository
-                                .remote_anonymous(&https_url)?,
-                            https_flow,
-                        ));
-                    }
-                }
-
-                if let Ok(ssh_url) = remote_url.as_ssh() {
-                    let ssh_flow = self
-                        .ssh_flow()?
-                        .into_iter()
-                        .map(Credential::Ssh)
-                        .collect::<Vec<_>>();
-                    if !ssh_flow.is_empty() {
-                        flow.push((
-                            project_repository
-                                .git_repository
-                                .remote_anonymous(&ssh_url)?,
-                            ssh_flow,
-                        ));
-                    }
-                }
-
-                Ok(flow)
-            }
-        }
-    }
-
     fn https_flow(
         project_repository: &project_repository::Repository,
         remote_url: &super::Url,
@@ -340,45 +189,12 @@ impl Helper {
         let mut flow = vec![];
 
         let mut helper = git2::CredentialHelper::new(&remote_url.to_string());
-        let config = project_repository.git_repository.config()?;
-        helper.config(&git2::Config::from(config));
+        let config = project_repository.repo().config()?;
+        helper.config(&config);
         if let Some((username, password)) = helper.execute() {
             flow.push(HttpsCredential::CredentialHelper { username, password });
         }
 
-        Ok(flow)
-    }
-
-    fn ssh_flow(&self) -> Result<Vec<SshCredential>, HelpError> {
-        let mut flow = vec![];
-        if let Some(home_path) = self.home_dir.as_ref() {
-            let id_rsa_path = home_path.join(".ssh").join("id_rsa");
-            if id_rsa_path.exists() {
-                flow.push(SshCredential::Keyfile {
-                    key_path: id_rsa_path.clone(),
-                    passphrase: None,
-                });
-            }
-
-            let id_ed25519_path = home_path.join(".ssh").join("id_ed25519");
-            if id_ed25519_path.exists() {
-                flow.push(SshCredential::Keyfile {
-                    key_path: id_ed25519_path.clone(),
-                    passphrase: None,
-                });
-            }
-
-            let id_ecdsa_path = home_path.join(".ssh").join("id_ecdsa");
-            if id_ecdsa_path.exists() {
-                flow.push(SshCredential::Keyfile {
-                    key_path: id_ecdsa_path.clone(),
-                    passphrase: None,
-                });
-            }
-        }
-
-        let key = self.keys.get_or_create()?;
-        flow.push(SshCredential::GitButlerKey(Box::new(key)));
         Ok(flow)
     }
 }

@@ -1,15 +1,17 @@
 pub mod commands {
     use crate::error::Error;
-    use anyhow::Context;
+    use anyhow::{anyhow, Context};
     use gitbutler_core::{
         assets,
         error::Code,
-        git, projects,
-        projects::ProjectId,
+        git,
+        projects::{self, ProjectId},
+        types::ReferenceName,
         virtual_branches::{
             branch::{self, BranchId, BranchOwnershipClaims},
             controller::Controller,
-            BaseBranch, RemoteBranch, RemoteBranchData, RemoteBranchFile, VirtualBranches,
+            BaseBranch, NameConflitResolution, RemoteBranch, RemoteBranchData, RemoteBranchFile,
+            VirtualBranches,
         },
     };
     use tauri::{AppHandle, Manager};
@@ -26,13 +28,13 @@ pub mod commands {
         message: &str,
         ownership: Option<BranchOwnershipClaims>,
         run_hooks: bool,
-    ) -> Result<git::Oid, Error> {
+    ) -> Result<String, Error> {
         let oid = handle
             .state::<Controller>()
-            .create_commit(&project_id, &branch, message, ownership.as_ref(), run_hooks)
+            .create_commit(project_id, branch, message, ownership.as_ref(), run_hooks)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
-        Ok(oid)
+        emit_vbranches(&handle, project_id).await;
+        Ok(oid.to_string())
     }
 
     #[tauri::command(async)]
@@ -43,7 +45,7 @@ pub mod commands {
     ) -> Result<VirtualBranches, Error> {
         let (branches, skipped_files) = handle
             .state::<Controller>()
-            .list_virtual_branches(&project_id)
+            .list_virtual_branches(project_id)
             .await?;
 
         let proxy = handle.state::<assets::Proxy>();
@@ -63,9 +65,9 @@ pub mod commands {
     ) -> Result<BranchId, Error> {
         let branch_id = handle
             .state::<Controller>()
-            .create_virtual_branch(&project_id, &branch)
+            .create_virtual_branch(project_id, &branch)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(branch_id)
     }
 
@@ -78,24 +80,24 @@ pub mod commands {
     ) -> Result<BranchId, Error> {
         let branch_id = handle
             .state::<Controller>()
-            .create_virtual_branch_from_branch(&project_id, &branch)
+            .create_virtual_branch_from_branch(project_id, &branch)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(branch_id)
     }
 
     #[tauri::command(async)]
     #[instrument(skip(handle), err(Debug))]
-    pub async fn merge_virtual_branch_upstream(
+    pub async fn integrate_upstream_commits(
         handle: AppHandle,
         project_id: ProjectId,
         branch: BranchId,
     ) -> Result<(), Error> {
         handle
             .state::<Controller>()
-            .merge_virtual_branch_upstream(&project_id, &branch)
+            .integrate_upstream_commits(project_id, branch)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -105,17 +107,16 @@ pub mod commands {
         handle: AppHandle,
         project_id: ProjectId,
     ) -> Result<Option<BaseBranch>, Error> {
-        if let Some(base_branch) = handle
+        if let Ok(base_branch) = handle
             .state::<Controller>()
-            .get_base_branch_data(&project_id)
-            .await?
+            .get_base_branch_data(project_id)
+            .await
         {
             let proxy = handle.state::<assets::Proxy>();
             let base_branch = proxy.proxy_base_branch(base_branch).await;
-            Ok(Some(base_branch))
-        } else {
-            Ok(None)
+            return Ok(Some(base_branch));
         }
+        Ok(None)
     }
 
     #[tauri::command(async)]
@@ -126,13 +127,12 @@ pub mod commands {
         branch: &str,
         push_remote: Option<&str>, // optional different name of a remote to push to (defaults to same as the branch)
     ) -> Result<BaseBranch, Error> {
-        dbg!(&project_id, &branch, &push_remote);
         let branch_name = format!("refs/remotes/{}", branch)
             .parse()
             .context("Invalid branch name")?;
         let base_branch = handle
             .state::<Controller>()
-            .set_base_branch(&project_id, &branch_name)
+            .set_base_branch(project_id, &branch_name)
             .await?;
         let base_branch = handle
             .state::<assets::Proxy>()
@@ -143,22 +143,25 @@ pub mod commands {
         if let Some(push_remote) = push_remote {
             handle
                 .state::<Controller>()
-                .set_target_push_remote(&project_id, push_remote)
+                .set_target_push_remote(project_id, push_remote)
                 .await?;
         }
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(base_branch)
     }
 
     #[tauri::command(async)]
     #[instrument(skip(handle), err(Debug))]
-    pub async fn update_base_branch(handle: AppHandle, project_id: ProjectId) -> Result<(), Error> {
-        handle
+    pub async fn update_base_branch(
+        handle: AppHandle,
+        project_id: ProjectId,
+    ) -> Result<Vec<ReferenceName>, Error> {
+        let unapplied_branches = handle
             .state::<Controller>()
-            .update_base_branch(&project_id)
+            .update_base_branch(project_id)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
-        Ok(())
+        emit_vbranches(&handle, project_id).await;
+        Ok(unapplied_branches)
     }
 
     #[tauri::command(async)]
@@ -170,10 +173,10 @@ pub mod commands {
     ) -> Result<(), Error> {
         handle
             .state::<Controller>()
-            .update_virtual_branch(&project_id, branch)
+            .update_virtual_branch(project_id, branch)
             .await?;
 
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -186,39 +189,25 @@ pub mod commands {
     ) -> Result<(), Error> {
         handle
             .state::<Controller>()
-            .delete_virtual_branch(&project_id, &branch_id)
+            .delete_virtual_branch(project_id, branch_id)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
     #[tauri::command(async)]
     #[instrument(skip(handle), err(Debug))]
-    pub async fn apply_branch(
+    pub async fn convert_to_real_branch(
         handle: AppHandle,
         project_id: ProjectId,
         branch: BranchId,
+        name_conflict_resolution: NameConflitResolution,
     ) -> Result<(), Error> {
         handle
             .state::<Controller>()
-            .apply_virtual_branch(&project_id, &branch)
+            .convert_to_real_branch(project_id, branch, name_conflict_resolution)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
-        Ok(())
-    }
-
-    #[tauri::command(async)]
-    #[instrument(skip(handle), err(Debug))]
-    pub async fn unapply_branch(
-        handle: AppHandle,
-        project_id: ProjectId,
-        branch: BranchId,
-    ) -> Result<(), Error> {
-        handle
-            .state::<Controller>()
-            .unapply_virtual_branch(&project_id, &branch)
-            .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -231,9 +220,9 @@ pub mod commands {
     ) -> Result<(), Error> {
         handle
             .state::<Controller>()
-            .unapply_ownership(&project_id, &ownership)
+            .unapply_ownership(project_id, &ownership)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -251,9 +240,9 @@ pub mod commands {
             .collect::<Vec<String>>();
         handle
             .state::<Controller>()
-            .reset_files(&project_id, &files)
+            .reset_files(project_id, &files)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -267,25 +256,11 @@ pub mod commands {
     ) -> Result<(), Error> {
         handle
             .state::<Controller>()
-            .push_virtual_branch(&project_id, &branch_id, with_force, Some(Some(branch_id)))
+            .push_virtual_branch(project_id, branch_id, with_force, Some(Some(branch_id)))
             .await
             .map_err(|err| err.context(Code::Unknown))?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
-    }
-
-    #[tauri::command(async)]
-    #[instrument(skip(handle), err(Debug))]
-    pub async fn can_apply_virtual_branch(
-        handle: AppHandle,
-        project_id: ProjectId,
-        branch_id: BranchId,
-    ) -> Result<bool, Error> {
-        handle
-            .state::<Controller>()
-            .can_apply_virtual_branch(&project_id, &branch_id)
-            .await
-            .map_err(Into::into)
     }
 
     #[tauri::command(async)]
@@ -297,7 +272,7 @@ pub mod commands {
     ) -> Result<bool, Error> {
         Ok(handle
             .state::<Controller>()
-            .can_apply_remote_branch(&project_id, &branch)
+            .can_apply_remote_branch(project_id, &branch)
             .await?)
     }
 
@@ -306,11 +281,12 @@ pub mod commands {
     pub async fn list_remote_commit_files(
         handle: AppHandle,
         project_id: ProjectId,
-        commit_oid: git::Oid,
+        commit_oid: String,
     ) -> Result<Vec<RemoteBranchFile>, Error> {
+        let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
         handle
             .state::<Controller>()
-            .list_remote_commit_files(&project_id, commit_oid)
+            .list_remote_commit_files(project_id, commit_oid)
             .await
             .map_err(Into::into)
     }
@@ -321,30 +297,15 @@ pub mod commands {
         handle: AppHandle,
         project_id: ProjectId,
         branch_id: BranchId,
-        target_commit_oid: git::Oid,
+        target_commit_oid: String,
     ) -> Result<(), Error> {
+        let target_commit_oid = git2::Oid::from_str(&target_commit_oid).map_err(|e| anyhow!(e))?;
         handle
             .state::<Controller>()
-            .reset_virtual_branch(&project_id, &branch_id, target_commit_oid)
+            .reset_virtual_branch(project_id, branch_id, target_commit_oid)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
-    }
-
-    #[tauri::command(async)]
-    #[instrument(skip(handle), err(Debug))]
-    pub async fn cherry_pick_onto_virtual_branch(
-        handle: AppHandle,
-        project_id: ProjectId,
-        branch_id: BranchId,
-        target_commit_oid: git::Oid,
-    ) -> Result<Option<git::Oid>, Error> {
-        let oid = handle
-            .state::<Controller>()
-            .cherry_pick(&project_id, &branch_id, target_commit_oid)
-            .await?;
-        emit_vbranches(&handle, &project_id).await;
-        Ok(oid)
     }
 
     #[tauri::command(async)]
@@ -353,15 +314,16 @@ pub mod commands {
         handle: AppHandle,
         project_id: ProjectId,
         branch_id: BranchId,
-        commit_oid: git::Oid,
+        commit_oid: String,
         ownership: BranchOwnershipClaims,
-    ) -> Result<git::Oid, Error> {
+    ) -> Result<String, Error> {
+        let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
         let oid = handle
             .state::<Controller>()
-            .amend(&project_id, &branch_id, commit_oid, &ownership)
+            .amend(project_id, branch_id, commit_oid, &ownership)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
-        Ok(oid)
+        emit_vbranches(&handle, project_id).await;
+        Ok(oid.to_string())
     }
 
     #[tauri::command(async)]
@@ -370,22 +332,24 @@ pub mod commands {
         handle: AppHandle,
         project_id: ProjectId,
         branch_id: BranchId,
-        from_commit_oid: git::Oid,
-        to_commit_oid: git::Oid,
+        from_commit_oid: String,
+        to_commit_oid: String,
         ownership: BranchOwnershipClaims,
-    ) -> Result<git::Oid, Error> {
+    ) -> Result<String, Error> {
+        let from_commit_oid = git2::Oid::from_str(&from_commit_oid).map_err(|e| anyhow!(e))?;
+        let to_commit_oid = git2::Oid::from_str(&to_commit_oid).map_err(|e| anyhow!(e))?;
         let oid = handle
             .state::<Controller>()
             .move_commit_file(
-                &project_id,
-                &branch_id,
+                project_id,
+                branch_id,
                 from_commit_oid,
                 to_commit_oid,
                 &ownership,
             )
             .await?;
-        emit_vbranches(&handle, &project_id).await;
-        Ok(oid)
+        emit_vbranches(&handle, project_id).await;
+        Ok(oid.to_string())
     }
 
     #[tauri::command(async)]
@@ -394,13 +358,14 @@ pub mod commands {
         handle: AppHandle,
         project_id: ProjectId,
         branch_id: BranchId,
-        commit_oid: git::Oid,
+        commit_oid: String,
     ) -> Result<(), Error> {
+        let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
         handle
             .state::<Controller>()
-            .undo_commit(&project_id, &branch_id, commit_oid)
+            .undo_commit(project_id, branch_id, commit_oid)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -410,14 +375,15 @@ pub mod commands {
         handle: AppHandle,
         project_id: ProjectId,
         branch_id: BranchId,
-        commit_oid: git::Oid,
+        commit_oid: String,
         offset: i32,
     ) -> Result<(), Error> {
+        let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
         handle
             .state::<Controller>()
-            .insert_blank_commit(&project_id, &branch_id, commit_oid, offset)
+            .insert_blank_commit(project_id, branch_id, commit_oid, offset)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -427,14 +393,15 @@ pub mod commands {
         handle: AppHandle,
         project_id: ProjectId,
         branch_id: BranchId,
-        commit_oid: git::Oid,
+        commit_oid: String,
         offset: i32,
     ) -> Result<(), Error> {
+        let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
         handle
             .state::<Controller>()
-            .reorder_commit(&project_id, &branch_id, commit_oid, offset)
+            .reorder_commit(project_id, branch_id, commit_oid, offset)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -446,7 +413,7 @@ pub mod commands {
     ) -> Result<Vec<RemoteBranch>, Error> {
         let branches = handle
             .state::<Controller>()
-            .list_remote_branches(&project_id)
+            .list_remote_branches(project_id)
             .await?;
         Ok(branches)
     }
@@ -460,7 +427,7 @@ pub mod commands {
     ) -> Result<RemoteBranchData, Error> {
         let branch_data = handle
             .state::<Controller>()
-            .get_remote_branch_data(&project_id, &refname)
+            .get_remote_branch_data(project_id, &refname)
             .await?;
         let branch_data = handle
             .state::<assets::Proxy>()
@@ -475,31 +442,32 @@ pub mod commands {
         handle: tauri::AppHandle,
         project_id: ProjectId,
         branch_id: BranchId,
-        target_commit_oid: git::Oid,
+        target_commit_oid: String,
     ) -> Result<(), Error> {
+        let target_commit_oid = git2::Oid::from_str(&target_commit_oid).map_err(|e| anyhow!(e))?;
         handle
             .state::<Controller>()
-            .squash(&project_id, &branch_id, target_commit_oid)
+            .squash(project_id, branch_id, target_commit_oid)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
     #[tauri::command(async)]
     #[instrument(skip(handle), err(Debug))]
-    pub async fn fetch_from_target(
+    pub async fn fetch_from_remotes(
         handle: tauri::AppHandle,
         project_id: ProjectId,
         action: Option<String>,
     ) -> Result<BaseBranch, Error> {
         let base_branch = handle
             .state::<Controller>()
-            .fetch_from_target(
-                &project_id,
+            .fetch_from_remotes(
+                project_id,
                 Some(action.unwrap_or_else(|| "unknown".to_string())),
             )
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(base_branch)
     }
 
@@ -508,14 +476,15 @@ pub mod commands {
     pub async fn move_commit(
         handle: tauri::AppHandle,
         project_id: ProjectId,
-        commit_oid: git::Oid,
+        commit_oid: String,
         target_branch_id: BranchId,
     ) -> Result<(), Error> {
+        let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
         handle
             .state::<Controller>()
-            .move_commit(&project_id, &target_branch_id, commit_oid)
+            .move_commit(project_id, target_branch_id, commit_oid)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
@@ -525,22 +494,23 @@ pub mod commands {
         handle: tauri::AppHandle,
         project_id: ProjectId,
         branch_id: BranchId,
-        commit_oid: git::Oid,
+        commit_oid: String,
         message: &str,
     ) -> Result<(), Error> {
+        let commit_oid = git2::Oid::from_str(&commit_oid).map_err(|e| anyhow!(e))?;
         handle
             .state::<Controller>()
-            .update_commit_message(&project_id, &branch_id, commit_oid, message)
+            .update_commit_message(project_id, branch_id, commit_oid, message)
             .await?;
-        emit_vbranches(&handle, &project_id).await;
+        emit_vbranches(&handle, project_id).await;
         Ok(())
     }
 
-    async fn emit_vbranches(handle: &AppHandle, project_id: &projects::ProjectId) {
+    async fn emit_vbranches(handle: &AppHandle, project_id: projects::ProjectId) {
         if let Err(error) = handle
             .state::<watcher::Watchers>()
             .post(gitbutler_watcher::Action::CalculateVirtualBranches(
-                *project_id,
+                project_id,
             ))
             .await
         {

@@ -1,6 +1,6 @@
 <script lang="ts">
-	import Button from '$lib/components/Button.svelte';
-	import Modal from '$lib/components/Modal.svelte';
+	import Button from '$lib/shared/Button.svelte';
+	import Modal from '$lib/shared/Modal.svelte';
 
 	export let projectTitle: string = '#';
 	export let isDeleting = false;
@@ -41,7 +41,7 @@
 		</p>
 	</div>
 
-	<svelte:fragment slot="controls" let:close>
+	{#snippet controls(close)}
 		<Button
 			style="error"
 			kind="solid"
@@ -50,17 +50,19 @@
 			icon="bin-small"
 			on:click={() => {
 				onDeleteClicked().then(close);
-			}}>Remove</Button
+			}}
 		>
+			Remove
+		</Button>
 		<Button style="pop" kind="solid" on:click={close}>Cancel</Button>
-	</svelte:fragment>
+	{/snippet}
 </Modal>
 
 <style lang="postcss">
 	.remove-project-description {
 		display: flex;
 		flex-direction: column;
-		gap: var(--size-8);
+		gap: 8px;
 	}
 
 	.details-text {

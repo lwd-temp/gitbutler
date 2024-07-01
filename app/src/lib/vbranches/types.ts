@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { splitMessage } from '$lib/utils/commitMessage';
 import { hashCode } from '$lib/utils/string';
 import { isDefined, notNull } from '$lib/utils/typeguards';
+import { convertRemoteToWebUrl } from '$lib/utils/url';
 import { Type, Transform } from 'class-transformer';
 
 export type ChangeType =
@@ -45,8 +46,8 @@ export class LocalFile {
 	@Transform((obj) => new Date(obj.value))
 	modifiedAt!: Date;
 	// This indicates if a file has merge conflict markers generated and not yet resolved.
-	// This is true for files after a branch which does not apply cleanly (Branch.isMergeable == false) is applied.
-	// (therefore this field is applicable only for the workspace, i.e. active == true)
+	// This is true for files after a branch which does not apply cleanly (Branch.isMergeable === false) is applied.
+	// (therefore this field is applicable only for the workspace, i.e. active === true)
 	conflicted!: boolean;
 	content!: string;
 	binary!: boolean;
@@ -106,9 +107,11 @@ export class Branch {
 	commits!: Commit[];
 	requiresForce!: boolean;
 	description!: string;
+	head!: string;
 	order!: number;
 	@Type(() => RemoteBranch)
 	upstream?: RemoteBranch;
+	upstreamData?: RemoteBranchData;
 	upstreamName?: string;
 	conflicted!: boolean;
 	// TODO: to be removed from the API
@@ -117,23 +120,34 @@ export class Branch {
 	// This should actually be named "canBeCleanlyApplied" - if it's false, applying this branch will generate conflict markers,
 	// but it's totatlly okay for a user to apply it.
 	// If the branch has been already applied, then it was either performed cleanly or we generated conflict markers in the diffs.
-	// (therefore this field is applicable for stashed/unapplied or remote branches, i.e. active == false)
+	// (therefore this field is applicable for stashed/unapplied or remote branches, i.e. active === false)
 	isMergeable!: Promise<boolean>;
 	@Transform((obj) => new Date(obj.value))
 	updatedAt!: Date;
 	// Indicates that branch is default target for new changes
 	selectedForChanges!: boolean;
+	/// The merge base between the target branch and the virtual branch
+	mergeBase!: string;
+	/// The fork point between the target branch and the virtual branch
+	forkPoint!: string;
+	allowRebasing!: boolean;
 
 	get localCommits() {
-		return this.commits.filter((c) => c.status == 'local');
+		return this.commits.filter((c) => c.status === 'local');
 	}
 
 	get remoteCommits() {
-		return this.commits.filter((c) => c.status == 'remote');
+		return this.commits.filter((c) => c.status === 'localAndRemote');
 	}
 
 	get integratedCommits() {
-		return this.commits.filter((c) => c.status == 'integrated');
+		return this.commits.filter((c) => c.status === 'integrated');
+	}
+
+	get displayName() {
+		if (this.upstream?.displayName) return this.upstream?.displayName;
+
+		return this.upstreamName || this.name;
 	}
 }
 
@@ -148,7 +162,7 @@ export type ComponentColor =
 	| 'error'
 	| 'warning'
 	| 'purple';
-export type CommitStatus = 'local' | 'remote' | 'integrated' | 'upstream';
+export type CommitStatus = 'local' | 'localAndRemote' | 'integrated' | 'remote';
 
 export class Commit {
 	id!: string;
@@ -162,19 +176,22 @@ export class Commit {
 	files!: LocalFile[];
 	parentIds!: string[];
 	branchId!: string;
+	changeId!: string;
+	isSigned!: boolean;
+	relatedTo?: RemoteCommit;
+
+	prev?: Commit;
+	next?: Commit;
 
 	get isLocal() {
 		return !this.isRemote && !this.isIntegrated;
 	}
 
-	get status() {
-		if (!this.isIntegrated && !this.isRemote) {
-			return 'local';
-		} else if (!this.isIntegrated && this.isRemote) {
-			return 'remote';
-		} else if (this.isIntegrated) {
-			return 'integrated';
-		}
+	get status(): CommitStatus {
+		if (this.isIntegrated) return 'integrated';
+		if (this.isRemote && (!this.relatedTo || this.id === this.relatedTo.id))
+			return 'localAndRemote';
+		return 'local';
 	}
 
 	get descriptionTitle(): string | undefined {
@@ -188,6 +205,14 @@ export class Commit {
 	isParentOf(possibleChild: Commit) {
 		return possibleChild.parentIds.includes(this.id);
 	}
+
+	isMergeCommit() {
+		return this.parentIds.length > 1;
+	}
+}
+
+export function isLocalCommit(obj: any): obj is Commit {
+	return obj instanceof Commit;
 }
 
 export class RemoteCommit {
@@ -196,6 +221,13 @@ export class RemoteCommit {
 	description!: string;
 	@Transform((obj) => new Date(obj.value * 1000))
 	createdAt!: Date;
+	changeId!: string;
+	isSigned!: boolean;
+	parentIds!: string[];
+
+	prev?: RemoteCommit;
+	next?: RemoteCommit;
+	relatedTo?: Commit;
 
 	get isLocal() {
 		return false;
@@ -208,14 +240,27 @@ export class RemoteCommit {
 	get descriptionBody(): string | undefined {
 		return splitMessage(this.description).description || undefined;
 	}
+
+	get status(): CommitStatus {
+		return 'remote';
+	}
+
+	isMergeCommit() {
+		return this.parentIds.length > 1;
+	}
+}
+
+export function isRemoteCommit(obj: any): obj is RemoteCommit {
+	return obj instanceof RemoteCommit;
 }
 
 export type AnyCommit = Commit | RemoteCommit;
 
-export const LOCAL_COMMITS = Symbol('LocalCommtis');
-export const REMOTE_COMMITS = Symbol('RemoteCommits');
-export const INTEGRATED_COMMITS = Symbol('IntegratedCommits');
-export const UNKNOWN_COMMITS = Symbol('UnknownCommits');
+export function commitCompare(left: AnyCommit, right: AnyCommit): boolean {
+	if (left.id === right.id) return true;
+	if (left.changeId && right.changeId && left.changeId === right.changeId) return true;
+	return false;
+}
 
 export class RemoteHunk {
 	diff!: string;
@@ -286,7 +331,7 @@ export class RemoteBranch {
 	lastCommitAuthor?: string | undefined;
 
 	get displayName(): string {
-		return this.name.replace('refs/remotes/', '').replace('origin/', '').replace('refs/heads/', '');
+		return this.name.replace('refs/remotes/', '').replace('refs/heads/', '');
 	}
 }
 
@@ -298,6 +343,7 @@ export class RemoteBranchData {
 	@Type(() => RemoteCommit)
 	commits!: RemoteCommit[];
 	isMergeable!: boolean | undefined;
+	forkPoint?: string | undefined;
 
 	get ahead(): number {
 		return this.commits.length;
@@ -314,7 +360,7 @@ export class RemoteBranchData {
 	get authors(): Author[] {
 		const allAuthors = this.commits.map((commit) => commit.author);
 		const uniqueAuthors = allAuthors.filter(
-			(author, index) => allAuthors.findIndex((a) => a.email == author.email) == index
+			(author, index) => allAuthors.findIndex((a) => a.email === author.email) === index
 		);
 		return uniqueAuthors;
 	}
@@ -348,20 +394,11 @@ export class BaseBranch {
 	}
 
 	get pushRepoBaseUrl(): string {
-		return this.cleanUrl(this.pushRemoteUrl);
+		return convertRemoteToWebUrl(this.pushRemoteUrl);
 	}
 
 	get repoBaseUrl(): string {
-		return this.cleanUrl(this.remoteUrl);
-	}
-
-	// turn a git remote url into a web url (github, gitlab, bitbucket, etc)
-	private cleanUrl(url: string): string {
-		if (url.startsWith('http')) {
-			return url.replace('.git', '').trim();
-		} else {
-			return url.replace(':', '/').replace('git@', 'https://').replace('.git', '').trim();
-		}
+		return convertRemoteToWebUrl(this.remoteUrl);
 	}
 
 	commitUrl(commitId: string): string | undefined {
@@ -424,3 +461,17 @@ export class BaseBranch {
 		return this.repoBaseUrl.includes('gitlab.com');
 	}
 }
+
+export type NameConflictResolution =
+	| {
+			type: 'suffix';
+			value: undefined;
+	  }
+	| {
+			type: 'overwrite';
+			value: undefined;
+	  }
+	| {
+			type: 'rename';
+			value: string;
+	  };

@@ -41,22 +41,25 @@
 	.domain-button {
 		display: flex;
 		align-items: center;
-		gap: var(--size-10);
+		gap: 10px;
 		border-radius: var(--radius-m);
-		padding: var(--size-10);
+		padding: 10px;
 		color: var(--clr-text-1);
 		transition: background-color var(--transition-fast);
 	}
 
 	.icon {
 		border-radius: var(--radius-s);
-		height: var(--size-20);
-		width: var(--size-20);
+		height: 20px;
+		width: 20px;
 		flex-shrink: 0;
 	}
 
 	.domain-button:not(.selected):hover,
-	.domain-button:not(.selected):focus,
+	.domain-button:not(.selected):focus {
+		background-color: var(--clr-bg-1-muted);
+	}
+
 	.selected {
 		background-color: var(--clr-bg-2);
 	}

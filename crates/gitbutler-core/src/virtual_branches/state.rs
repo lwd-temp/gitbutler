@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
-    fs::File,
-    io::Read,
     path::{Path, PathBuf},
 };
 
+use crate::{error::Code, fs::read_toml_file_or_default};
+use anyhow::{anyhow, Result};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
 use super::{target::Target, Branch};
@@ -38,7 +39,7 @@ impl VirtualBranchesHandle {
     /// Persists the default target for the given repository.
     ///
     /// Errors if the file cannot be read or written.
-    pub fn set_default_target(&self, target: Target) -> anyhow::Result<()> {
+    pub fn set_default_target(&self, target: Target) -> Result<()> {
         let mut virtual_branches = self.read_file()?;
         virtual_branches.default_target = Some(target);
         self.write_file(&virtual_branches)?;
@@ -48,52 +49,27 @@ impl VirtualBranchesHandle {
     /// Gets the default target for the given repository.
     ///
     /// Errors if the file cannot be read or written.
-    pub fn get_default_target(&self) -> Result<Target, crate::reader::Error> {
+    pub fn get_default_target(&self) -> Result<Target> {
         let virtual_branches = self.read_file();
         virtual_branches?
             .default_target
-            .ok_or(crate::reader::Error::NotFound)
-    }
-
-    /// Attempts to get the default target for the given repository,
-    /// returning None if it's not found.
-    ///
-    /// Errors if the file cannot be read or written.
-    #[inline]
-    pub fn try_get_default_target(&self) -> Result<Option<Target>, crate::reader::Error> {
-        match self.get_default_target() {
-            Ok(target) => Ok(Some(target)),
-            Err(crate::reader::Error::NotFound) => Ok(None),
-            Err(e) => Err(e),
-        }
+            .ok_or(anyhow!("there is no default target").context(Code::DefaultTargetNotFound))
     }
 
     /// Sets the target for the given virtual branch.
     ///
     /// Errors if the file cannot be read or written.
-    pub fn set_branch_target(&self, id: BranchId, target: Target) -> anyhow::Result<()> {
+    pub fn set_branch_target(&self, id: BranchId, target: Target) -> Result<()> {
         let mut virtual_branches = self.read_file()?;
         virtual_branches.branch_targets.insert(id, target);
         self.write_file(&virtual_branches)?;
         Ok(())
     }
 
-    /// Gets the target for the given virtual branch.
-    ///
-    /// Errors if the file cannot be read or written.
-    pub fn get_branch_target(&self, id: &BranchId) -> Result<Target, crate::reader::Error> {
-        let virtual_branches = self.read_file()?;
-        let tartget = virtual_branches.branch_targets.get(id).cloned();
-        match tartget {
-            Some(target) => Ok(target),
-            None => self.get_default_target(),
-        }
-    }
-
     /// Sets the state of the given virtual branch.
     ///
     /// Errors if the file cannot be read or written.
-    pub fn set_branch(&self, branch: Branch) -> anyhow::Result<()> {
+    pub fn set_branch(&self, branch: Branch) -> Result<()> {
         let mut virtual_branches = self.read_file()?;
         virtual_branches.branches.insert(branch.id, branch);
         self.write_file(&virtual_branches)?;
@@ -103,7 +79,7 @@ impl VirtualBranchesHandle {
     /// Removes the given virtual branch.
     ///
     /// Errors if the file cannot be read or written.
-    pub fn remove_branch(&self, id: BranchId) -> anyhow::Result<()> {
+    pub fn remove_branch(&self, id: BranchId) -> Result<()> {
         let mut virtual_branches = self.read_file()?;
         virtual_branches.branches.remove(&id);
         self.write_file(&virtual_branches)?;
@@ -113,19 +89,22 @@ impl VirtualBranchesHandle {
     /// Gets the state of the given virtual branch.
     ///
     /// Errors if the file cannot be read or written.
-    pub fn get_branch(&self, id: &BranchId) -> Result<Branch, crate::reader::Error> {
+    pub fn get_branch(&self, id: BranchId) -> Result<Branch> {
+        self.try_branch(id)?
+            .ok_or_else(|| anyhow!("branch with ID {id} not found"))
+    }
+
+    /// Gets the state of the given virtual branch returning `Some(branch)` or `None`
+    /// if that branch doesn't exist.
+    pub fn try_branch(&self, id: BranchId) -> Result<Option<Branch>> {
         let virtual_branches = self.read_file()?;
-        virtual_branches
-            .branches
-            .get(id)
-            .cloned()
-            .ok_or(crate::reader::Error::NotFound)
+        Ok(virtual_branches.branches.get(&id).cloned())
     }
 
     /// Lists all virtual branches.
     ///
     /// Errors if the file cannot be read or written.
-    pub fn list_branches(&self) -> anyhow::Result<Vec<Branch>> {
+    pub fn list_branches(&self) -> Result<Vec<Branch>> {
         let virtual_branches = self.read_file()?;
         let branches: Vec<Branch> = virtual_branches.branches.values().cloned().collect();
         Ok(branches)
@@ -141,27 +120,47 @@ impl VirtualBranchesHandle {
     /// Reads and parses the state file.
     ///
     /// If the file does not exist, it will be created.
-    fn read_file(&self) -> Result<VirtualBranches, crate::reader::Error> {
-        // let file_path = &self.file_path.lock().await;
-        if !self.file_path.exists() {
-            return Ok(VirtualBranches::default());
-        }
-        let mut file: File = File::open(self.file_path.as_path())?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-        let virtual_branches: VirtualBranches =
-            toml::from_str(&contents).map_err(|e| crate::reader::Error::ParseError {
-                path: self.file_path.clone(),
-                source: e,
-            })?;
-        Ok(virtual_branches)
+    fn read_file(&self) -> Result<VirtualBranches> {
+        read_toml_file_or_default(&self.file_path)
     }
 
-    fn write_file(&self, virtual_branches: &VirtualBranches) -> anyhow::Result<()> {
+    fn write_file(&self, virtual_branches: &VirtualBranches) -> Result<()> {
         write(self.file_path.as_path(), virtual_branches)
+    }
+
+    pub fn update_ordering(&self) -> Result<()> {
+        let succeeded = self
+            .list_branches()?
+            .iter()
+            .sorted_by_key(|branch| branch.order)
+            .enumerate()
+            .all(|(index, branch)| {
+                let mut branch = branch.clone();
+                branch.order = index;
+                self.set_branch(branch).is_ok()
+            });
+
+        if succeeded {
+            Ok(())
+        } else {
+            Err(anyhow!("Failed to update virtual branches ordering"))
+        }
+    }
+
+    pub fn next_order_index(&self) -> Result<usize> {
+        self.update_ordering()?;
+        let order = self
+            .list_branches()?
+            .iter()
+            .sorted_by_key(|branch| branch.order)
+            .collect::<Vec<&Branch>>()
+            .last()
+            .map_or(0, |b| b.order + 1);
+
+        Ok(order)
     }
 }
 
-fn write<P: AsRef<Path>>(file_path: P, virtual_branches: &VirtualBranches) -> anyhow::Result<()> {
+fn write<P: AsRef<Path>>(file_path: P, virtual_branches: &VirtualBranches) -> Result<()> {
     crate::fs::write(file_path, toml::to_string(&virtual_branches)?)
 }

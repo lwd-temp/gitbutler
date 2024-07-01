@@ -1,6 +1,6 @@
 <script lang="ts">
-	import Tag from './Tag.svelte';
-	import { showError } from '$lib/notifications/toasts';
+	import { showInfo, showError } from '$lib/notifications/toasts';
+	import Button from '$lib/shared/Button.svelte';
 	import { getContext } from '$lib/utils/context';
 	import { BranchController } from '$lib/vbranches/branchController';
 
@@ -9,15 +9,18 @@
 	let loading = false;
 </script>
 
-<Tag
+<Button
+	size="tag"
 	style="error"
 	kind="solid"
 	help="Merge upstream commits into common base"
-	clickable
 	on:click={async () => {
 		loading = true;
 		try {
-			await branchController.updateBaseBranch();
+			let infoText = await branchController.updateBaseBranch();
+			if (infoText) {
+				showInfo('Stashed conflicting branches', infoText);
+			}
 		} catch (err) {
 			showError('Failed update workspace', err);
 		} finally {
@@ -30,4 +33,4 @@
 	{:else}
 		Update
 	{/if}
-</Tag>
+</Button>

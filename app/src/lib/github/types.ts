@@ -15,12 +15,16 @@ export interface PullRequest {
 	author: Author | null;
 	labels: Label[];
 	draft: boolean;
-	targetBranch: string;
 	sourceBranch: string;
+	targetBranch: string;
+	sha: string;
 	createdAt: Date;
 	modifiedAt: Date;
 	mergedAt?: Date;
 	closedAt?: Date;
+	repoName?: string;
+	repositorySshUrl?: string;
+	repositoryHttpsUrl?: string;
 }
 
 export type DetailedGitHubPullRequest = RestEndpointMethodTypes['pulls']['get']['response']['data'];
@@ -57,13 +61,15 @@ export function parseGitHubDetailedPullRequest(
 
 export type ChecksStatus =
 	| {
-			startedAt?: Date;
-			completed?: boolean;
-			success?: boolean;
-			hasChecks?: boolean;
-			queued?: number;
-			totalCount?: number;
-			skipped?: number;
+			startedAt: Date;
+			completed: boolean;
+			success: boolean;
+			hasChecks: boolean;
+			failed: number;
+			queued: number;
+			totalCount: number;
+			skipped: number;
+			finished: number;
 	  }
 	| null
 	| undefined;
@@ -88,7 +94,7 @@ export function ghResponseToInstance(
 			? {
 					name: pr.user.login || undefined,
 					email: pr.user.email || undefined,
-					isBot: pr.user.type.toLowerCase() == 'bot',
+					isBot: pr.user.type.toLowerCase() === 'bot',
 					gravatarUrl: new URL(pr.user.avatar_url)
 				}
 			: null,
@@ -96,10 +102,14 @@ export function ghResponseToInstance(
 		draft: pr.draft || false,
 		createdAt: new Date(pr.created_at),
 		modifiedAt: new Date(pr.created_at),
-		targetBranch: pr.head.ref,
-		sourceBranch: pr.base.ref,
+		sourceBranch: pr.head.ref,
+		targetBranch: pr.base.ref,
+		sha: pr.head.sha,
 		mergedAt: pr.merged_at ? new Date(pr.merged_at) : undefined,
-		closedAt: pr.closed_at ? new Date(pr.closed_at) : undefined
+		closedAt: pr.closed_at ? new Date(pr.closed_at) : undefined,
+		repoName: pr.head.repo?.full_name,
+		repositorySshUrl: pr.head.repo?.ssh_url,
+		repositoryHttpsUrl: pr.head.repo?.clone_url
 	};
 }
 
@@ -125,7 +135,7 @@ export type CheckSuites =
 export type CheckSuite = {
 	name?: string;
 	count: number;
-	status: 'queued' | 'in_progress' | 'completed' | null;
+	status: 'queued' | 'in_progress' | 'completed' | 'waiting' | 'requested' | 'pending' | null;
 };
 
 export function parseGitHubCheckSuites(data: GitHubListCheckSuitesResp): CheckSuite[] {

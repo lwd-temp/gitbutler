@@ -13,16 +13,17 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use git2::TreeEntry;
 use gitbutler_core::{
-    git,
+    git::{self, CommitExt, CommitHeadersV2, RepositoryExt},
     virtual_branches::{
-        self, apply_branch,
-        branch::{BranchCreateRequest, BranchOwnershipClaims},
-        commit, create_virtual_branch,
-        errors::CommitError,
+        self,
+        branch::{BranchCreateRequest, BranchOwnershipClaims, BranchUpdateRequest},
+        commit, create_virtual_branch, create_virtual_branch_from_branch,
+        integrate_upstream_commits,
         integration::verify_branch,
-        is_remote_branch_mergeable, is_virtual_branch_mergeable, list_remote_branches,
-        merge_virtual_branch_upstream, unapply_ownership, update_branch,
+        is_remote_branch_mergeable, list_remote_branches, list_virtual_branches, unapply_ownership,
+        update_branch,
     },
 };
 use pretty_assertions::assert_eq;
@@ -60,9 +61,8 @@ fn commit_on_branch_then_change_file_then_get_status() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "test commit",
-        None,
         None,
         None,
         false,
@@ -84,55 +84,6 @@ fn commit_on_branch_then_change_file_then_get_status() -> Result<()> {
     let branch = &branches[0];
     assert_eq!(branch.files.len(), 1);
     assert_eq!(branch.commits.len(), 1);
-
-    Ok(())
-}
-
-#[test]
-fn signed_commit() -> Result<()> {
-    let suite = Suite::default();
-    let Case {
-        project,
-        project_repository,
-        ..
-    } = &suite.new_case_with_files(HashMap::from([
-        (PathBuf::from("test.txt"), "line1\nline2\nline3\nline4\n"),
-        (PathBuf::from("test2.txt"), "line5\nline6\nline7\nline8\n"),
-    ]));
-
-    set_test_target(project_repository)?;
-
-    let branch1_id = create_virtual_branch(project_repository, &BranchCreateRequest::default())
-        .expect("failed to create virtual branch")
-        .id;
-
-    std::fs::write(
-        Path::new(&project.path).join("test.txt"),
-        "line0\nline1\nline2\nline3\nline4\n",
-    )?;
-
-    let mut config = project_repository
-        .git_repository
-        .config()
-        .with_context(|| "failed to get config")?;
-    config.set_str("gitbutler.signCommits", "true")?;
-
-    // commit
-    commit(
-        project_repository,
-        &branch1_id,
-        "test commit",
-        None,
-        Some(suite.keys.get_or_create()?).as_ref(),
-        None,
-        false,
-    )?;
-
-    let (branches, _) = virtual_branches::list_virtual_branches(project_repository).unwrap();
-    let commit_id = &branches[0].commits[0].id;
-    let commit_obj = project_repository.git_repository.find_commit(*commit_id)?;
-    // check the raw_header contains the string "SSH SIGNATURE"
-    assert!(commit_obj.raw_header().unwrap().contains("SSH SIGNATURE"));
 
     Ok(())
 }
@@ -165,7 +116,7 @@ fn track_binary_files() -> Result<()> {
     ];
     let mut file = std::fs::File::create(Path::new(&project.path).join("image.bin"))?;
     file.write_all(&image_data)?;
-    commit_all(&project_repository.git_repository);
+    commit_all(project_repository.repo());
 
     set_test_target(project_repository)?;
 
@@ -208,9 +159,8 @@ fn track_binary_files() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "test commit",
-        None,
         None,
         None,
         false,
@@ -219,9 +169,11 @@ fn track_binary_files() -> Result<()> {
     // status (no files)
     let (branches, _) = virtual_branches::list_virtual_branches(project_repository).unwrap();
     let commit_id = &branches[0].commits[0].id;
-    let commit_obj = project_repository.git_repository.find_commit(*commit_id)?;
+    let commit_obj = project_repository
+        .repo()
+        .find_commit(commit_id.to_owned())?;
     let tree = commit_obj.tree()?;
-    let files = tree_to_entry_list(&project_repository.git_repository, &tree);
+    let files = tree_to_entry_list(project_repository.repo(), &tree);
     assert_eq!(files[0].0, "image.bin");
     assert_eq!(
         files[0].3, img_oid_hex,
@@ -240,9 +192,8 @@ fn track_binary_files() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "test commit",
-        None,
         None,
         None,
         false,
@@ -251,9 +202,11 @@ fn track_binary_files() -> Result<()> {
     let (branches, _) = virtual_branches::list_virtual_branches(project_repository).unwrap();
     let commit_id = &branches[0].commits[0].id;
     // get tree from commit_id
-    let commit_obj = project_repository.git_repository.find_commit(*commit_id)?;
+    let commit_obj = project_repository
+        .repo()
+        .find_commit(commit_id.to_owned())?;
     let tree = commit_obj.tree()?;
-    let files = tree_to_entry_list(&project_repository.git_repository, &tree);
+    let files = tree_to_entry_list(project_repository.repo(), &tree);
 
     assert_eq!(files[0].0, "image.bin");
     assert_eq!(files[0].3, "ea6901a04d1eed6ebf6822f4360bda9f008fa317");
@@ -281,7 +234,7 @@ fn create_branch_with_ownership() -> Result<()> {
     virtual_branches::get_status_by_branch(project_repository, None).expect("failed to get status");
 
     let vb_state = project_repository.project().virtual_branches();
-    let branch0 = vb_state.get_branch(&branch0.id).unwrap();
+    let branch0 = vb_state.get_branch(branch0.id).unwrap();
 
     let branch1 = create_virtual_branch(
         project_repository,
@@ -401,7 +354,7 @@ fn hunk_expantion() -> Result<()> {
     // even though selected branch has changed
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch1_id,
             order: Some(1),
             ..Default::default()
@@ -409,7 +362,7 @@ fn hunk_expantion() -> Result<()> {
     )?;
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch2_id,
             order: Some(0),
             ..Default::default()
@@ -521,12 +474,12 @@ fn move_hunks_multiple_sources() -> Result<()> {
     )?;
 
     let vb_state = project.virtual_branches();
-    let mut branch2 = vb_state.get_branch(&branch2_id)?;
+    let mut branch2 = vb_state.get_branch(branch2_id)?;
     branch2.ownership = BranchOwnershipClaims {
         claims: vec!["test.txt:1-5".parse()?],
     };
     vb_state.set_branch(branch2.clone())?;
-    let mut branch1 = vb_state.get_branch(&branch1_id)?;
+    let mut branch1 = vb_state.get_branch(branch1_id)?;
     branch1.ownership = BranchOwnershipClaims {
         claims: vec!["test.txt:11-15".parse()?],
     };
@@ -550,7 +503,7 @@ fn move_hunks_multiple_sources() -> Result<()> {
 
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch3_id,
             ownership: Some("test.txt:1-5,11-15".parse()?),
             ..Default::default()
@@ -627,7 +580,7 @@ fn move_hunks_partial_explicitly() -> Result<()> {
 
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch2_id,
             ownership: Some("test.txt:1-5".parse()?),
             ..Default::default()
@@ -719,6 +672,80 @@ fn add_new_hunk_to_the_end() -> Result<()> {
 }
 
 #[test]
+fn commit_id_can_be_generated_or_specified() -> Result<()> {
+    let suite = Suite::default();
+    let Case {
+        project_repository,
+        project,
+        ..
+    } = &suite.new_case();
+
+    let file_path = Path::new("test.txt");
+    std::fs::write(
+        Path::new(&project.path).join(file_path),
+        "line1\nline2\nline3\nline4\n",
+    )?;
+    commit_all(project_repository.repo());
+
+    // lets make sure a change id is generated
+    let target_oid = project_repository.repo().head().unwrap().target().unwrap();
+    let target = project_repository.repo().find_commit(target_oid).unwrap();
+    let change_id = target.change_id();
+
+    // make sure we created a change-id
+    assert!(change_id.is_some());
+
+    // ok, make another change and specify a change-id
+    let file_path = Path::new("test.txt");
+    std::fs::write(
+        Path::new(&project.path).join(file_path),
+        "line1\nline2\nline3\nline4\nline5\n",
+    )?;
+
+    let repository = project_repository.repo();
+    let mut index = repository.index().expect("failed to get index");
+    index
+        .add_all(["."], git2::IndexAddOption::DEFAULT, None)
+        .expect("failed to add all");
+    index.write().expect("failed to write index");
+    let oid = index.write_tree().expect("failed to write tree");
+    let signature = git2::Signature::now("test", "test@email.com").unwrap();
+    let head = repository.head().expect("failed to get head");
+    let refname: git::Refname = head.name().unwrap().parse().unwrap();
+    project_repository
+        .repo()
+        .commit_with_signature(
+            Some(&refname),
+            &signature,
+            &signature,
+            "some commit",
+            &repository.find_tree(oid).expect("failed to find tree"),
+            &[&repository
+                .find_commit(
+                    repository
+                        .refname_to_id("HEAD")
+                        .expect("failed to get head"),
+                )
+                .expect("failed to find commit")],
+            // The change ID should always be generated by calling CommitHeadersV2::new
+            Some(CommitHeadersV2 {
+                change_id: "my-change-id".to_string(),
+                is_unapplied_header_commit: false,
+                vbranch_name: None,
+            }),
+        )
+        .expect("failed to commit");
+
+    let target_oid = project_repository.repo().head().unwrap().target().unwrap();
+    let target = project_repository.repo().find_commit(target_oid).unwrap();
+    let change_id = target.change_id();
+
+    // the change id should be what we specified, rather than randomly generated
+    assert_eq!(change_id, Some("my-change-id".to_string()));
+    Ok(())
+}
+
+#[test]
 fn merge_vbranch_upstream_clean_rebase() -> Result<()> {
     let suite = Suite::default();
     let Case {
@@ -733,26 +760,16 @@ fn merge_vbranch_upstream_clean_rebase() -> Result<()> {
         Path::new(&project.path).join(file_path),
         "line1\nline2\nline3\nline4\n",
     )?;
-    commit_all(&project_repository.git_repository);
-    let target_oid = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+    commit_all(project_repository.repo());
+    let target_oid = project_repository.repo().head().unwrap().target().unwrap();
 
     std::fs::write(
         Path::new(&project.path).join(file_path),
         "line1\nline2\nline3\nline4\nupstream\n",
     )?;
     // add a commit to the target branch it's pointing to so there is something "upstream"
-    commit_all(&project_repository.git_repository);
-    let last_push = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+    commit_all(project_repository.repo());
+    let last_push = project_repository.repo().head().unwrap().target().unwrap();
 
     // coworker adds some work
     std::fs::write(
@@ -760,17 +777,12 @@ fn merge_vbranch_upstream_clean_rebase() -> Result<()> {
         "line1\nline2\nline3\nline4\nupstream\ncoworker work\n",
     )?;
 
-    commit_all(&project_repository.git_repository);
-    let coworker_work = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+    commit_all(project_repository.repo());
+    let coworker_work = project_repository.repo().head().unwrap().target().unwrap();
 
     //update repo ref refs/remotes/origin/master to up_target oid
-    project_repository.git_repository.reference(
-        &"refs/remotes/origin/master".parse().unwrap(),
+    project_repository.repo().reference(
+        "refs/remotes/origin/master",
         coworker_work,
         true,
         "update target",
@@ -795,14 +807,15 @@ fn merge_vbranch_upstream_clean_rebase() -> Result<()> {
     let file_path2 = Path::new("test2.txt");
     std::fs::write(Path::new(&project.path).join(file_path2), "file2\n")?;
 
+    // Update integration commit
+    virtual_branches::integration::update_gitbutler_integration(&vb_state, project_repository)?;
+
     let remote_branch: git::RemoteRefname = "refs/remotes/origin/master".parse().unwrap();
     let mut branch = create_virtual_branch(project_repository, &BranchCreateRequest::default())
         .expect("failed to create virtual branch");
     branch.upstream = Some(remote_branch.clone());
     branch.head = last_push;
-    vb_state
-        .set_branch(branch.clone())
-        .context("failed to write target branch after push")?;
+    vb_state.set_branch(branch.clone())?;
 
     // create the branch
     let (branches, _) = virtual_branches::list_virtual_branches(project_repository)?;
@@ -811,12 +824,7 @@ fn merge_vbranch_upstream_clean_rebase() -> Result<()> {
     assert_eq!(branch1.commits.len(), 1);
     // assert_eq!(branch1.upstream.as_ref().unwrap().commits.len(), 1);
 
-    merge_virtual_branch_upstream(
-        project_repository,
-        &branch1.id,
-        Some(suite.keys.get_or_create()?).as_ref(),
-        None,
-    )?;
+    integrate_upstream_commits(project_repository, branch1.id, None)?;
 
     let (branches, _) = virtual_branches::list_virtual_branches(project_repository)?;
     let branch1 = &branches[0];
@@ -835,14 +843,14 @@ fn merge_vbranch_upstream_clean_rebase() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn merge_vbranch_upstream_conflict() -> Result<()> {
+#[tokio::test]
+async fn merge_vbranch_upstream_conflict() -> Result<()> {
     let suite = Suite::default();
-    let Case {
-        project_repository,
-        project,
-        ..
-    } = &suite.new_case();
+    let mut case = suite.new_case();
+
+    case = case.refresh(&suite);
+    let project_repository = &case.project_repository;
+    let project = &case.project;
 
     // create a commit and set the target
     let file_path = Path::new("test.txt");
@@ -850,26 +858,16 @@ fn merge_vbranch_upstream_conflict() -> Result<()> {
         Path::new(&project.path).join(file_path),
         "line1\nline2\nline3\nline4\n",
     )?;
-    commit_all(&project_repository.git_repository);
-    let target_oid = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+    commit_all(project_repository.repo());
+    let target_oid = project_repository.repo().head().unwrap().target().unwrap();
 
     std::fs::write(
         Path::new(&project.path).join(file_path),
         "line1\nline2\nline3\nline4\nupstream\n",
     )?;
     // add a commit to the target branch it's pointing to so there is something "upstream"
-    commit_all(&project_repository.git_repository);
-    let last_push = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+    commit_all(project_repository.repo());
+    let last_push = project_repository.repo().head().unwrap().target().unwrap();
 
     // coworker adds some work
     std::fs::write(
@@ -877,17 +875,12 @@ fn merge_vbranch_upstream_conflict() -> Result<()> {
         "line1\nline2\nline3\nline4\nupstream\ncoworker work\n",
     )?;
 
-    commit_all(&project_repository.git_repository);
-    let coworker_work = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+    commit_all(project_repository.repo());
+    let coworker_work = project_repository.repo().head().unwrap().target().unwrap();
 
     //update repo ref refs/remotes/origin/master to up_target oid
-    project_repository.git_repository.reference(
-        &"refs/remotes/origin/master".parse().unwrap(),
+    project_repository.repo().reference(
+        "refs/remotes/origin/master",
         coworker_work,
         true,
         "update target",
@@ -919,9 +912,17 @@ fn merge_vbranch_upstream_conflict() -> Result<()> {
         .expect("failed to create virtual branch");
     branch.upstream = Some(remote_branch.clone());
     branch.head = last_push;
-    vb_state
-        .set_branch(branch.clone())
-        .context("failed to write target branch after push")?;
+    vb_state.set_branch(branch.clone())?;
+
+    update_branch(
+        project_repository,
+        &BranchUpdateRequest {
+            id: branch.id,
+            allow_rebasing: Some(false),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     // create the branch
     let (branches, _) = virtual_branches::list_virtual_branches(project_repository)?;
@@ -931,7 +932,7 @@ fn merge_vbranch_upstream_conflict() -> Result<()> {
     assert_eq!(branch1.commits.len(), 1);
     // assert_eq!(branch1.upstream.as_ref().unwrap().commits.len(), 1);
 
-    merge_virtual_branch_upstream(project_repository, &branch1.id, None, None)?;
+    integrate_upstream_commits(project_repository, branch1.id, None)?;
 
     let (branches, _) = virtual_branches::list_virtual_branches(project_repository)?;
     let branch1 = &branches[0];
@@ -959,9 +960,8 @@ fn merge_vbranch_upstream_conflict() -> Result<()> {
     // commit the merge resolution
     commit(
         project_repository,
-        &branch1.id,
+        branch1.id,
         "fix merge conflict",
-        None,
         None,
         None,
         false,
@@ -975,7 +975,7 @@ fn merge_vbranch_upstream_conflict() -> Result<()> {
 
     // make sure the last commit was a merge commit (2 parents)
     let last_id = &branch1.commits[0].id;
-    let last_commit = project_repository.git_repository.find_commit(*last_id)?;
+    let last_commit = project_repository.repo().find_commit(last_id.to_owned())?;
     assert_eq!(last_commit.parent_count(), 2);
 
     Ok(())
@@ -1043,7 +1043,7 @@ fn unapply_branch() -> Result<()> {
         Path::new(&project.path).join(file_path),
         "line1\nline2\nline3\nline4\n",
     )?;
-    commit_all(&project_repository.git_repository);
+    commit_all(project_repository.repo());
 
     set_test_target(project_repository)?;
 
@@ -1063,7 +1063,7 @@ fn unapply_branch() -> Result<()> {
 
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch2_id,
             ownership: Some("test2.txt:1-3".parse()?),
             ..Default::default()
@@ -1083,7 +1083,11 @@ fn unapply_branch() -> Result<()> {
     assert_eq!(branch.files.len(), 1);
     assert!(branch.active);
 
-    virtual_branches::unapply_branch(project_repository, &branch1_id)?;
+    let real_branch = virtual_branches::convert_to_real_branch(
+        project_repository,
+        branch1_id,
+        Default::default(),
+    )?;
 
     let contents = std::fs::read(Path::new(&project.path).join(file_path))?;
     assert_eq!("line1\nline2\nline3\nline4\n", String::from_utf8(contents)?);
@@ -1091,11 +1095,13 @@ fn unapply_branch() -> Result<()> {
     assert_eq!("line5\nline6\n", String::from_utf8(contents)?);
 
     let (branches, _) = virtual_branches::list_virtual_branches(project_repository)?;
-    let branch = &branches.iter().find(|b| b.id == branch1_id).unwrap();
-    assert_eq!(branch.files.len(), 1);
-    assert!(!branch.active);
+    assert!(!branches.iter().any(|b| b.id == branch1_id));
 
-    apply_branch(project_repository, &branch1_id, None, None)?;
+    let branch1_id = virtual_branches::create_virtual_branch_from_branch(
+        project_repository,
+        &git::Refname::try_from(&real_branch)?,
+        None,
+    )?;
     let contents = std::fs::read(Path::new(&project.path).join(file_path))?;
     assert_eq!(
         "line1\nline2\nline3\nline4\nbranch1\n",
@@ -1126,7 +1132,7 @@ fn apply_unapply_added_deleted_files() -> Result<()> {
     std::fs::write(Path::new(&project.path).join(file_path), "file1\n")?;
     let file_path2 = Path::new("test2.txt");
     std::fs::write(Path::new(&project.path).join(file_path2), "file2\n")?;
-    commit_all(&project_repository.git_repository);
+    commit_all(project_repository.repo());
 
     set_test_target(project_repository)?;
 
@@ -1144,7 +1150,7 @@ fn apply_unapply_added_deleted_files() -> Result<()> {
 
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch2_id,
             ownership: Some("test2.txt:0-0".parse()?),
             ..Default::default()
@@ -1152,27 +1158,50 @@ fn apply_unapply_added_deleted_files() -> Result<()> {
     )?;
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch3_id,
             ownership: Some("test3.txt:1-2".parse()?),
             ..Default::default()
         },
     )?;
 
-    virtual_branches::unapply_branch(project_repository, &branch2_id)?;
+    list_virtual_branches(project_repository).unwrap();
+
+    let real_branch_2 = virtual_branches::convert_to_real_branch(
+        project_repository,
+        branch2_id,
+        Default::default(),
+    )?;
+
     // check that file2 is back
     let contents = std::fs::read(Path::new(&project.path).join(file_path2))?;
     assert_eq!("file2\n", String::from_utf8(contents)?);
 
-    virtual_branches::unapply_branch(project_repository, &branch3_id)?;
+    let real_branch_3 = virtual_branches::convert_to_real_branch(
+        project_repository,
+        branch3_id,
+        Default::default(),
+    )?;
     // check that file3 is gone
     assert!(!Path::new(&project.path).join(file_path3).exists());
 
-    apply_branch(project_repository, &branch2_id, None, None)?;
+    create_virtual_branch_from_branch(
+        project_repository,
+        &git::Refname::try_from(&real_branch_2).unwrap(),
+        None,
+    )
+    .unwrap();
+
     // check that file2 is gone
     assert!(!Path::new(&project.path).join(file_path2).exists());
 
-    apply_branch(project_repository, &branch3_id, None, None)?;
+    create_virtual_branch_from_branch(
+        project_repository,
+        &git::Refname::try_from(&real_branch_3).unwrap(),
+        None,
+    )
+    .unwrap();
+
     // check that file3 is back
     let contents = std::fs::read(Path::new(&project.path).join(file_path3))?;
     assert_eq!("file3\n", String::from_utf8(contents)?);
@@ -1180,6 +1209,7 @@ fn apply_unapply_added_deleted_files() -> Result<()> {
     Ok(())
 }
 
+// Verifies that we are able to detect when a remote branch is conflicting with the current applied branches.
 #[test]
 fn detect_mergeable_branch() -> Result<()> {
     let suite = Suite::default();
@@ -1195,7 +1225,7 @@ fn detect_mergeable_branch() -> Result<()> {
         Path::new(&project.path).join(file_path),
         "line1\nline2\nline3\nline4\n",
     )?;
-    commit_all(&project_repository.git_repository);
+    commit_all(project_repository.repo());
 
     set_test_target(project_repository)?;
 
@@ -1215,7 +1245,7 @@ fn detect_mergeable_branch() -> Result<()> {
 
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch2_id,
             ownership: Some("test4.txt:1-3".parse()?),
             ..Default::default()
@@ -1224,14 +1254,12 @@ fn detect_mergeable_branch() -> Result<()> {
     .expect("failed to update branch");
 
     // unapply both branches and create some conflicting ones
-    virtual_branches::unapply_branch(project_repository, &branch1_id)?;
-    virtual_branches::unapply_branch(project_repository, &branch2_id)?;
+    virtual_branches::convert_to_real_branch(project_repository, branch1_id, Default::default())?;
+    virtual_branches::convert_to_real_branch(project_repository, branch2_id, Default::default())?;
 
+    project_repository.repo().set_head("refs/heads/master")?;
     project_repository
-        .git_repository
-        .set_head(&"refs/heads/master".parse().unwrap())?;
-    project_repository
-        .git_repository
+        .repo()
         .checkout_head(Some(&mut git2::build::CheckoutBuilder::default().force()))?;
 
     // create an upstream remote conflicting commit
@@ -1239,15 +1267,10 @@ fn detect_mergeable_branch() -> Result<()> {
         Path::new(&project.path).join(file_path),
         "line1\nline2\nline3\nline4\nupstream\n",
     )?;
-    commit_all(&project_repository.git_repository);
-    let up_target = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
-    project_repository.git_repository.reference(
-        &"refs/remotes/origin/remote_branch".parse().unwrap(),
+    commit_all(project_repository.repo());
+    let up_target = project_repository.repo().head().unwrap().target().unwrap();
+    project_repository.repo().reference(
+        "refs/remotes/origin/remote_branch",
         up_target,
         true,
         "update target",
@@ -1260,15 +1283,10 @@ fn detect_mergeable_branch() -> Result<()> {
     )?;
     let file_path3 = Path::new("test3.txt");
     std::fs::write(Path::new(&project.path).join(file_path3), "file3\n")?;
-    commit_all(&project_repository.git_repository);
-    let up_target = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
-    project_repository.git_repository.reference(
-        &"refs/remotes/origin/remote_branch2".parse().unwrap(),
+    commit_all(project_repository.repo());
+    let up_target = project_repository.repo().head().unwrap().target().unwrap();
+    project_repository.repo().reference(
+        "refs/remotes/origin/remote_branch2",
         up_target,
         true,
         "update target",
@@ -1277,10 +1295,10 @@ fn detect_mergeable_branch() -> Result<()> {
     std::fs::remove_file(Path::new(&project.path).join(file_path3))?;
 
     project_repository
-        .git_repository
-        .set_head(&"refs/heads/gitbutler/integration".parse().unwrap())?;
+        .repo()
+        .set_head("refs/heads/gitbutler/integration")?;
     project_repository
-        .git_repository
+        .repo()
         .checkout_head(Some(&mut git2::build::CheckoutBuilder::default().force()))?;
 
     // create branches that conflict with our earlier branches
@@ -1305,22 +1323,11 @@ fn detect_mergeable_branch() -> Result<()> {
 
     let vb_state = project.virtual_branches();
 
-    let mut branch4 = vb_state.get_branch(&branch4_id)?;
+    let mut branch4 = vb_state.get_branch(branch4_id)?;
     branch4.ownership = BranchOwnershipClaims {
         claims: vec!["test2.txt:1-6".parse()?],
     };
     vb_state.set_branch(branch4.clone())?;
-
-    let (branches, _) = virtual_branches::list_virtual_branches(project_repository)?;
-    assert_eq!(branches.len(), 4);
-
-    let branch1 = &branches.iter().find(|b| b.id == branch1_id).unwrap();
-    assert!(!branch1.active);
-    assert!(!is_virtual_branch_mergeable(project_repository, &branch1.id).unwrap());
-
-    let branch2 = &branches.iter().find(|b| b.id == branch2_id).unwrap();
-    assert!(!branch2.active);
-    assert!(is_virtual_branch_mergeable(project_repository, &branch2.id).unwrap());
 
     let remotes = list_remote_branches(project_repository).expect("failed to list remotes");
     let _remote1 = &remotes
@@ -1366,27 +1373,17 @@ fn upstream_integrated_vbranch() -> Result<()> {
 
     let vb_state = project_repository.project().virtual_branches();
 
-    let base_commit = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
+    let base_commit = project_repository.repo().head().unwrap().target().unwrap();
 
     std::fs::write(
         Path::new(&project.path).join("test.txt"),
         "file1\nversion2\n",
     )?;
-    commit_all(&project_repository.git_repository);
+    commit_all(project_repository.repo());
 
-    let upstream_commit = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
-    project_repository.git_repository.reference(
-        &"refs/remotes/origin/master".parse().unwrap(),
+    let upstream_commit = project_repository.repo().head().unwrap().target().unwrap();
+    project_repository.repo().reference(
+        "refs/remotes/origin/master",
         upstream_commit,
         true,
         "update target",
@@ -1399,8 +1396,8 @@ fn upstream_integrated_vbranch() -> Result<()> {
         push_remote_name: None,
     })?;
     project_repository
-        .git_repository
-        .remote("origin", &"http://origin.com/project".parse().unwrap())?;
+        .repo()
+        .remote("origin", "http://origin.com/project")?;
     virtual_branches::integration::update_gitbutler_integration(&vb_state, project_repository)?;
 
     // create vbranches, one integrated, one not
@@ -1426,7 +1423,7 @@ fn upstream_integrated_vbranch() -> Result<()> {
 
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch1_id,
             name: Some("integrated".to_string()),
             ownership: Some("test.txt:1-2".parse()?),
@@ -1436,7 +1433,7 @@ fn upstream_integrated_vbranch() -> Result<()> {
 
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch2_id,
             name: Some("not integrated".to_string()),
             ownership: Some("test2.txt:1-2".parse()?),
@@ -1446,7 +1443,7 @@ fn upstream_integrated_vbranch() -> Result<()> {
 
     update_branch(
         project_repository,
-        virtual_branches::branch::BranchUpdateRequest {
+        &virtual_branches::branch::BranchUpdateRequest {
             id: branch3_id,
             name: Some("not committed".to_string()),
             ownership: Some("test3.txt:1-2".parse()?),
@@ -1457,18 +1454,16 @@ fn upstream_integrated_vbranch() -> Result<()> {
     // create a new virtual branch from the remote branch
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "integrated commit",
-        None,
         None,
         None,
         false,
     )?;
     commit(
         project_repository,
-        &branch2_id,
+        branch2_id,
         "non-integrated commit",
-        None,
         None,
         None,
         false,
@@ -1527,9 +1522,8 @@ fn commit_same_hunk_twice() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "first commit to test.txt",
-        None,
         None,
         None,
         false,
@@ -1563,9 +1557,8 @@ fn commit_same_hunk_twice() -> Result<()> {
 
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "second commit to test.txt",
-        None,
         None,
         None,
         false,
@@ -1622,9 +1615,8 @@ fn commit_same_file_twice() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "first commit to test.txt",
-        None,
         None,
         None,
         false,
@@ -1658,9 +1650,8 @@ fn commit_same_file_twice() -> Result<()> {
 
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "second commit to test.txt",
-        None,
         None,
         None,
         false,
@@ -1717,10 +1708,9 @@ fn commit_partial_by_hunk() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "first commit to test.txt",
         Some(&"test.txt:1-6".parse::<BranchOwnershipClaims>().unwrap()),
-        None,
         None,
         false,
     )?;
@@ -1736,10 +1726,9 @@ fn commit_partial_by_hunk() -> Result<()> {
 
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "second commit to test.txt",
         Some(&"test.txt:16-22".parse::<BranchOwnershipClaims>().unwrap()),
-        None,
         None,
         false,
     )?;
@@ -1769,16 +1758,8 @@ fn commit_partial_by_file() -> Result<()> {
         (PathBuf::from("test2.txt"), "file2\n"),
     ]));
 
-    let commit1_oid = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
-    let commit1 = project_repository
-        .git_repository
-        .find_commit(commit1_oid)
-        .unwrap();
+    let commit1_oid = project_repository.repo().head().unwrap().target().unwrap();
+    let commit1 = project_repository.repo().find_commit(commit1_oid).unwrap();
 
     set_test_target(project_repository)?;
 
@@ -1795,9 +1776,8 @@ fn commit_partial_by_file() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "branch1 commit",
-        None,
         None,
         None,
         false,
@@ -1809,17 +1789,17 @@ fn commit_partial_by_file() -> Result<()> {
     // branch one test.txt has just the 1st and 3rd hunks applied
     let commit2 = &branch1.commits[0].id;
     let commit2 = project_repository
-        .git_repository
-        .find_commit(*commit2)
+        .repo()
+        .find_commit(commit2.to_owned())
         .expect("failed to get commit object");
 
     let tree = commit1.tree().expect("failed to get tree");
-    let file_list = tree_to_file_list(&project_repository.git_repository, &tree);
+    let file_list = tree_to_file_list(project_repository.repo(), &tree);
     assert_eq!(file_list, vec!["test.txt", "test2.txt"]);
 
     // get the tree
     let tree = commit2.tree().expect("failed to get tree");
-    let file_list = tree_to_file_list(&project_repository.git_repository, &tree);
+    let file_list = tree_to_file_list(project_repository.repo(), &tree);
     assert_eq!(file_list, vec!["test.txt", "test3.txt"]);
 
     Ok(())
@@ -1837,16 +1817,8 @@ fn commit_add_and_delete_files() -> Result<()> {
         (PathBuf::from("test2.txt"), "file2\n"),
     ]));
 
-    let commit1_oid = project_repository
-        .git_repository
-        .head()
-        .unwrap()
-        .target()
-        .unwrap();
-    let commit1 = project_repository
-        .git_repository
-        .find_commit(commit1_oid)
-        .unwrap();
+    let commit1_oid = project_repository.repo().head().unwrap().target().unwrap();
+    let commit1 = project_repository.repo().find_commit(commit1_oid).unwrap();
 
     set_test_target(project_repository)?;
 
@@ -1863,9 +1835,8 @@ fn commit_add_and_delete_files() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "branch1 commit",
-        None,
         None,
         None,
         false,
@@ -1877,17 +1848,17 @@ fn commit_add_and_delete_files() -> Result<()> {
     // branch one test.txt has just the 1st and 3rd hunks applied
     let commit2 = &branch1.commits[0].id;
     let commit2 = project_repository
-        .git_repository
-        .find_commit(*commit2)
+        .repo()
+        .find_commit(commit2.to_owned())
         .expect("failed to get commit object");
 
     let tree = commit1.tree().expect("failed to get tree");
-    let file_list = tree_to_file_list(&project_repository.git_repository, &tree);
+    let file_list = tree_to_file_list(project_repository.repo(), &tree);
     assert_eq!(file_list, vec!["test.txt", "test2.txt"]);
 
     // get the tree
     let tree = commit2.tree().expect("failed to get tree");
-    let file_list = tree_to_file_list(&project_repository.git_repository, &tree);
+    let file_list = tree_to_file_list(project_repository.repo(), &tree);
     assert_eq!(file_list, vec!["test.txt", "test3.txt"]);
 
     Ok(())
@@ -1929,9 +1900,8 @@ fn commit_executable_and_symlinks() -> Result<()> {
     // commit
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "branch1 commit",
-        None,
         None,
         None,
         false,
@@ -1942,13 +1912,13 @@ fn commit_executable_and_symlinks() -> Result<()> {
 
     let commit = &branch1.commits[0].id;
     let commit = project_repository
-        .git_repository
-        .find_commit(*commit)
+        .repo()
+        .find_commit(commit.to_owned())
         .expect("failed to get commit object");
 
     let tree = commit.tree().expect("failed to get tree");
 
-    let list = tree_to_entry_list(&project_repository.git_repository, &tree);
+    let list = tree_to_entry_list(project_repository.repo(), &tree);
     assert_eq!(list[0].0, "test.txt");
     assert_eq!(list[0].1, "100644");
     assert_eq!(list[1].0, "test2.txt");
@@ -1962,27 +1932,27 @@ fn commit_executable_and_symlinks() -> Result<()> {
     Ok(())
 }
 
-fn tree_to_file_list(repository: &git::Repository, tree: &git::Tree) -> Vec<String> {
+fn tree_to_file_list(repository: &git2::Repository, tree: &git2::Tree) -> Vec<String> {
     let mut file_list = Vec::new();
-    tree.walk(|_, entry| {
+    walk(tree, |_, entry| {
         let path = entry.name().unwrap();
         let entry = tree.get_path(Path::new(path)).unwrap();
         let object = entry.to_object(repository).unwrap();
         if object.kind() == Some(git2::ObjectType::Blob) {
             file_list.push(path.to_string());
         }
-        git::TreeWalkResult::Continue
+        TreeWalkResult::Continue
     })
     .expect("failed to walk tree");
     file_list
 }
 
 fn tree_to_entry_list(
-    repository: &git::Repository,
-    tree: &git::Tree,
+    repository: &git2::Repository,
+    tree: &git2::Tree,
 ) -> Vec<(String, String, String, String)> {
     let mut file_list = Vec::new();
-    tree.walk(|_root, entry| {
+    walk(tree, |_root, entry| {
         let path = entry.name().unwrap();
         let entry = tree.get_path(Path::new(path)).unwrap();
         let object = entry.to_object(repository).unwrap();
@@ -2006,7 +1976,7 @@ fn tree_to_entry_list(
                 blob.id().to_string(),
             ));
         }
-        git::TreeWalkResult::Continue
+        TreeWalkResult::Continue
     })
     .expect("failed to walk tree");
     file_list
@@ -2028,9 +1998,9 @@ fn verify_branch_commits_to_integration() -> Result<()> {
     //  write two commits
     let file_path2 = Path::new("test2.txt");
     std::fs::write(Path::new(&project.path).join(file_path2), "file")?;
-    commit_all(&project_repository.git_repository);
+    commit_all(project_repository.repo());
     std::fs::write(Path::new(&project.path).join(file_path2), "update")?;
-    commit_all(&project_repository.git_repository);
+    commit_all(project_repository.repo());
 
     // verify puts commits onto the virtual branch
     verify_branch(project_repository).unwrap();
@@ -2057,15 +2027,13 @@ fn verify_branch_not_integration() -> Result<()> {
 
     verify_branch(project_repository).unwrap();
 
-    project_repository
-        .git_repository
-        .set_head(&"refs/heads/master".parse().unwrap())?;
+    project_repository.repo().set_head("refs/heads/master")?;
 
     let verify_result = verify_branch(project_repository);
     assert!(verify_result.is_err());
     assert_eq!(
-        verify_result.unwrap_err().to_string(),
-        "head is refs/heads/master"
+        format!("{:#}", verify_result.unwrap_err()),
+        "<verification-failed>: project is on refs/heads/master. Please checkout gitbutler/integration to continue"
     );
 
     Ok(())
@@ -2099,31 +2067,19 @@ fn pre_commit_hook_rejection() -> Result<()> {
     exit 1
             ";
 
-    git2_hooks::create_hook(
-        (&project_repository.git_repository).into(),
-        git2_hooks::HOOK_PRE_COMMIT,
-        hook,
-    );
+    git2_hooks::create_hook(project_repository.repo(), git2_hooks::HOOK_PRE_COMMIT, hook);
 
     let res = commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "test commit",
         None,
-        Some(suite.keys.get_or_create()?).as_ref(),
         None,
         true,
     );
 
-    let error = res.unwrap_err();
-
-    assert!(matches!(error, CommitError::CommitHookRejected(_)));
-
-    let CommitError::CommitHookRejected(output) = error else {
-        unreachable!()
-    };
-
-    assert_eq!(&output, "rejected\n");
+    let err = res.unwrap_err();
+    assert_eq!(err.to_string(), "commit hook rejected: rejected");
 
     Ok(())
 }
@@ -2156,13 +2112,13 @@ fn post_commit_hook() -> Result<()> {
             ";
 
     git2_hooks::create_hook(
-        (&project_repository.git_repository).into(),
+        project_repository.repo(),
         git2_hooks::HOOK_POST_COMMIT,
         hook,
     );
 
     let hook_ran_proof = project_repository
-        .git_repository
+        .repo()
         .path()
         .parent()
         .unwrap()
@@ -2172,10 +2128,9 @@ fn post_commit_hook() -> Result<()> {
 
     commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "test commit",
         None,
-        Some(suite.keys.get_or_create()?).as_ref(),
         None,
         true,
     )?;
@@ -2213,31 +2168,35 @@ fn commit_msg_hook_rejection() -> Result<()> {
     exit 1
             ";
 
-    git2_hooks::create_hook(
-        (&project_repository.git_repository).into(),
-        git2_hooks::HOOK_COMMIT_MSG,
-        hook,
-    );
+    git2_hooks::create_hook(project_repository.repo(), git2_hooks::HOOK_COMMIT_MSG, hook);
 
     let res = commit(
         project_repository,
-        &branch1_id,
+        branch1_id,
         "test commit",
         None,
-        Some(suite.keys.get_or_create()?).as_ref(),
         None,
         true,
     );
 
-    let error = res.unwrap_err();
-
-    assert!(matches!(error, CommitError::CommitMsgHookRejected(_)));
-
-    let CommitError::CommitMsgHookRejected(output) = error else {
-        unreachable!()
-    };
-
-    assert_eq!(&output, "rejected\n");
+    let err = res.unwrap_err();
+    assert_eq!(err.to_string(), "commit-msg hook rejected: rejected");
 
     Ok(())
+}
+
+fn walk<C>(tree: &git2::Tree, mut callback: C) -> Result<()>
+where
+    C: FnMut(&str, &TreeEntry) -> TreeWalkResult,
+{
+    tree.walk(git2::TreeWalkMode::PreOrder, |root, entry| {
+        match callback(root, &entry.clone()) {
+            TreeWalkResult::Continue => git2::TreeWalkResult::Ok,
+        }
+    })
+    .map_err(Into::into)
+}
+
+enum TreeWalkResult {
+    Continue,
 }

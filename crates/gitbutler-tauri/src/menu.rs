@@ -1,3 +1,5 @@
+use std::{env, fs};
+
 use anyhow::Context;
 use gitbutler_core::error;
 use gitbutler_core::error::Code;
@@ -27,13 +29,32 @@ pub async fn menu_item_set_enabled(
     let menu_item = window
         .menu_handle()
         .try_get_item(menu_item_id)
-        .with_context(|| {
-            error::Context::new(Code::Menu, format!("menu item not found: {}", menu_item_id))
-        })?;
+        .with_context(|| error::Context::new(format!("menu item not found: {}", menu_item_id)))?;
 
     menu_item.set_enabled(enabled).context(Code::Unknown)?;
 
     Ok(())
+}
+
+#[tauri::command()]
+pub fn resolve_vscode_variant() -> &'static str {
+    let vscodium_installed = check_if_installed("codium");
+    if vscodium_installed {
+        "vscodium"
+    } else {
+        // Fallback to vscode, as it was the previous behavior
+        "vscode"
+    }
+}
+
+fn check_if_installed(executable_name: &str) -> bool {
+    match env::var_os("PATH") {
+        Some(env_path) => env::split_paths(&env_path).any(|mut path| {
+            path.push(executable_name);
+            fs::metadata(path).is_ok()
+        }),
+        None => false,
+    }
 }
 
 pub fn build(_package_info: &PackageInfo) -> Menu {
@@ -50,6 +71,8 @@ pub fn build(_package_info: &PackageInfo) -> Menu {
                     app_name.to_string(),
                     AboutMetadata::default(),
                 ))
+                .add_native_item(MenuItem::Separator)
+                .add_item(CustomMenuItem::new("global/settings", "Settings").accelerator("Cmd+,"))
                 .add_native_item(MenuItem::Separator)
                 .add_native_item(MenuItem::Services)
                 .add_native_item(MenuItem::Separator)
@@ -122,8 +145,17 @@ pub fn build(_package_info: &PackageInfo) -> Menu {
     menu = menu.add_submenu(Submenu::new("View", view_menu));
 
     let mut project_menu = Menu::new();
+    project_menu = project_menu.add_item(
+        CustomMenuItem::new("project/history", "Project History").accelerator("CmdOrCtrl+Shift+H"),
+    );
+    project_menu = project_menu.add_item(CustomMenuItem::new(
+        "project/open-in-vscode",
+        "Open in VS Code",
+    ));
+
+    project_menu = project_menu.add_native_item(MenuItem::Separator);
     project_menu =
-        project_menu.add_item(disabled_menu_item("project/settings", "Project Settings"));
+        project_menu.add_item(CustomMenuItem::new("project/settings", "Project Settings"));
     menu = menu.add_submenu(Submenu::new("Project", project_menu));
 
     #[cfg(target_os = "macos")]
@@ -179,6 +211,26 @@ pub fn handle_event<R: Runtime>(event: &WindowMenuEvent<R>) {
 
     if event.menu_item_id() == "help/share-debug-info" {
         emit(event.window(), "menu://help/share-debug-info/clicked");
+        return;
+    }
+
+    if event.menu_item_id() == "project/history" {
+        emit(event.window(), "menu://project/history/clicked");
+        return;
+    }
+
+    if event.menu_item_id() == "project/open-in-vscode" {
+        emit(event.window(), "menu://project/open-in-vscode/clicked");
+        return;
+    }
+
+    if event.menu_item_id() == "project/settings" {
+        emit(event.window(), "menu://project/settings/clicked");
+        return;
+    }
+
+    if event.menu_item_id() == "global/settings" {
+        emit(event.window(), "menu://global/settings/clicked");
         return;
     }
 

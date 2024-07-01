@@ -1,31 +1,9 @@
-use std::{collections::HashMap, path};
-
-use anyhow::Context;
-use gitbutler_core::{
-    gb_repository, git, project_repository,
-    projects::{self, ProjectId},
-    reader,
-    sessions::SessionId,
-    users,
-};
+use gitbutler_core::{git, projects::ProjectId};
 use tauri::Manager;
 use tracing::instrument;
 
+use crate::app;
 use crate::error::Error;
-use crate::{app, watcher};
-
-#[tauri::command(async)]
-#[instrument(skip(handle), err(Debug))]
-pub async fn list_session_files(
-    handle: tauri::AppHandle,
-    project_id: ProjectId,
-    session_id: SessionId,
-    paths: Option<Vec<&path::Path>>,
-) -> Result<HashMap<path::PathBuf, reader::Content>, Error> {
-    let app = handle.state::<app::App>();
-    let files = app.list_session_files(&project_id, &session_id, paths.as_deref())?;
-    Ok(files)
-}
 
 #[tauri::command(async)]
 #[instrument(skip(handle), err(Debug))]
@@ -34,7 +12,7 @@ pub async fn git_remote_branches(
     project_id: ProjectId,
 ) -> Result<Vec<git::RemoteRefname>, Error> {
     let app = handle.state::<app::App>();
-    let branches = app.git_remote_branches(&project_id)?;
+    let branches = app.git_remote_branches(project_id)?;
     Ok(branches)
 }
 
@@ -49,7 +27,7 @@ pub async fn git_test_push(
     let app = handle.state::<app::App>();
     let helper = handle.state::<gitbutler_core::git::credentials::Helper>();
     Ok(app.git_test_push(
-        &project_id,
+        project_id,
         remote_name,
         branch_name,
         &helper,
@@ -69,7 +47,7 @@ pub async fn git_test_fetch(
     let app = handle.state::<app::App>();
     let helper = handle.state::<gitbutler_core::git::credentials::Helper>();
     Ok(app.git_test_fetch(
-        &project_id,
+        project_id,
         remote_name,
         &helper,
         Some(action.unwrap_or_else(|| "test".to_string())),
@@ -83,14 +61,14 @@ pub async fn git_index_size(
     project_id: ProjectId,
 ) -> Result<usize, Error> {
     let app = handle.state::<app::App>();
-    Ok(app.git_index_size(&project_id).expect("git index size"))
+    Ok(app.git_index_size(project_id).expect("git index size"))
 }
 
 #[tauri::command(async)]
 #[instrument(skip(handle), err(Debug))]
 pub async fn git_head(handle: tauri::AppHandle, project_id: ProjectId) -> Result<String, Error> {
     let app = handle.state::<app::App>();
-    let head = app.git_head(&project_id)?;
+    let head = app.git_head(project_id)?;
     Ok(head)
 }
 
@@ -110,7 +88,7 @@ pub async fn mark_resolved(
     path: &str,
 ) -> Result<(), Error> {
     let app = handle.state::<app::App>();
-    app.mark_resolved(&project_id, path)?;
+    app.mark_resolved(project_id, path)?;
     Ok(())
 }
 
@@ -133,36 +111,4 @@ pub async fn git_get_global_config(
 ) -> Result<Option<String>, Error> {
     let result = app::App::git_get_global_config(key)?;
     Ok(result)
-}
-
-#[tauri::command(async)]
-#[instrument(skip(handle), err(Debug))]
-pub async fn project_flush_and_push(handle: tauri::AppHandle, id: ProjectId) -> Result<(), Error> {
-    let users = handle.state::<users::Controller>().inner().clone();
-    let projects = handle.state::<projects::Controller>().inner().clone();
-    let local_data_dir = handle
-        .path_resolver()
-        .app_data_dir()
-        .context("failed to get app data dir")?;
-
-    let project = projects.get(&id).context("failed to get project")?;
-    let user = users.get_user()?;
-    let project_repository =
-        project_repository::Repository::open(&project).map_err(Error::from_error_with_context)?;
-    let gb_repo =
-        gb_repository::Repository::open(&local_data_dir, &project_repository, user.as_ref())
-            .context("failed to open repository")?;
-
-    if let Some(current_session) = gb_repo
-        .get_current_session()
-        .context("failed to get current session")?
-    {
-        let watcher = handle.state::<watcher::Watchers>();
-        watcher
-            .post(gitbutler_watcher::Action::Flush(id, current_session))
-            .await
-            .context("failed to post flush event")?;
-    }
-
-    Ok(())
 }

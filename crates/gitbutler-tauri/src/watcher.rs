@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use futures::executor::block_on;
 use gitbutler_core::projects::{self, Project, ProjectId};
-use gitbutler_core::{assets, deltas, sessions, users, virtual_branches};
+use gitbutler_core::{assets, users, virtual_branches};
 use tauri::{AppHandle, Manager};
 use tracing::instrument;
 
@@ -24,11 +24,6 @@ mod event {
     impl From<Change> for ChangeForFrontend {
         fn from(value: Change) -> Self {
             match value {
-                Change::GitIndex(project_id) => ChangeForFrontend {
-                    name: format!("project://{}/git/index", project_id),
-                    payload: serde_json::json!({}),
-                    project_id,
-                },
                 Change::GitFetch(project_id) => ChangeForFrontend {
                     name: format!("project://{}/git/fetch", project_id),
                     payload: serde_json::json!({}),
@@ -42,40 +37,6 @@ mod event {
                 Change::GitActivity(project_id) => ChangeForFrontend {
                     name: format!("project://{}/git/activity", project_id),
                     payload: serde_json::json!({}),
-                    project_id,
-                },
-                Change::File {
-                    project_id,
-                    session_id,
-                    file_path,
-                    contents,
-                } => ChangeForFrontend {
-                    name: format!("project://{}/sessions/{}/files", project_id, session_id),
-                    payload: serde_json::json!({
-                        "filePath": file_path,
-                        "contents": contents,
-                    }),
-                    project_id,
-                },
-                Change::Session {
-                    project_id,
-                    session,
-                } => ChangeForFrontend {
-                    name: format!("project://{}/sessions", project_id),
-                    payload: serde_json::to_value(session).unwrap(),
-                    project_id,
-                },
-                Change::Deltas {
-                    project_id,
-                    session_id,
-                    deltas,
-                    relative_file_path,
-                } => ChangeForFrontend {
-                    name: format!("project://{}/sessions/{}/deltas", project_id, session_id),
-                    payload: serde_json::json!({
-                        "deltas": deltas,
-                        "filePath": relative_file_path,
-                    }),
                     project_id,
                 },
                 Change::VirtualBranches {
@@ -113,25 +74,16 @@ pub struct Watchers {
 }
 
 fn handler_from_app(app: &AppHandle) -> anyhow::Result<gitbutler_watcher::Handler> {
-    let app_data_dir = app
-        .path_resolver()
-        .app_data_dir()
-        .context("failed to get app data dir")?;
-    let users = app.state::<users::Controller>().inner().clone();
     let projects = app.state::<projects::Controller>().inner().clone();
+    let users = app.state::<users::Controller>().inner().clone();
     let vbranches = app.state::<virtual_branches::Controller>().inner().clone();
     let assets_proxy = app.state::<assets::Proxy>().inner().clone();
-    let sessions_db = app.state::<sessions::Database>().inner().clone();
-    let deltas_db = app.state::<deltas::Database>().inner().clone();
 
     Ok(gitbutler_watcher::Handler::new(
-        app_data_dir.clone(),
-        users,
         projects,
+        users,
         vbranches,
         assets_proxy,
-        sessions_db,
-        deltas_db,
         {
             let app = app.clone();
             move |change| ChangeForFrontend::from(change).send(&app)
@@ -151,10 +103,9 @@ impl Watchers {
     pub fn watch(&self, project: &projects::Project) -> Result<()> {
         let handler = handler_from_app(&self.app_handle)?;
 
-        let project_id = project.id;
         let project_path = project.path.clone();
 
-        let handle = gitbutler_watcher::watch_in_background(handler, project_path, project_id)?;
+        let handle = gitbutler_watcher::watch_in_background(handler, project_path, project.id)?;
         block_on(self.watcher.lock()).replace(handle);
         Ok(())
     }
@@ -167,8 +118,21 @@ impl Watchers {
         {
             handle.post(action).await.context("failed to post event")
         } else {
-            Err(anyhow::anyhow!("watcher not found",))
+            Err(anyhow::anyhow!(
+                "matching watcher to post event not found, wanted {wanted}, got {actual:?}",
+                wanted = action.project_id(),
+                actual = watcher.as_ref().map(|w| w.project_id())
+            ))
         }
+    }
+
+    pub async fn flush(&self) -> Result<()> {
+        let watcher = self.watcher.lock().await;
+        if let Some(handle) = watcher.as_ref() {
+            handle.flush()?;
+        }
+
+        Ok(())
     }
 
     pub async fn stop(&self, project_id: ProjectId) {
@@ -190,15 +154,5 @@ impl gitbutler_core::projects::Watchers for Watchers {
 
     async fn stop(&self, id: ProjectId) {
         Watchers::stop(self, id).await
-    }
-
-    async fn fetch_gb_data(&self, id: ProjectId) -> Result<()> {
-        self.post(gitbutler_watcher::Action::FetchGitbutlerData(id))
-            .await
-    }
-
-    async fn push_gb_data(&self, id: ProjectId) -> Result<()> {
-        self.post(gitbutler_watcher::Action::PushGitbutlerData(id))
-            .await
     }
 }

@@ -1,8 +1,8 @@
 <script lang="ts">
-	import Button from './Button.svelte';
-	import Modal from './Modal.svelte';
-	import TextBox from './TextBox.svelte';
+	import Modal from '../shared/Modal.svelte';
+	import TextBox from '../shared/TextBox.svelte';
 	import { PromptService } from '$lib/backend/prompt';
+	import Button from '$lib/shared/Button.svelte';
 	import { getContext } from '$lib/utils/context';
 
 	const promptService = getContext(PromptService);
@@ -54,8 +54,7 @@
 	bind:this={modal}
 	width="small"
 	title="Git fetch requires input"
-	on:submit={async () => await submit()}
-	on:close={async () => await cancel()}
+	onclose={async () => await cancel()}
 >
 	<div class="message">
 		{#if $error}
@@ -66,18 +65,23 @@
 	</div>
 	<TextBox focus type="password" bind:value disabled={!!$error || loading} />
 
-	<svelte:fragment slot="controls">
-		<Button style="ghost" kind="solid" type="reset" disabled={loading} on:click={cancel}>
-			Cancel
-		</Button>
-		<Button style="pop" kind="solid" type="submit" grow disabled={!!$error || loading} {loading}
-			>Submit</Button
+	{#snippet controls()}
+		<Button style="ghost" outline type="reset" disabled={loading} on:click={cancel}>Cancel</Button>
+		<Button
+			style="pop"
+			kind="solid"
+			grow
+			disabled={!!$error || loading}
+			{loading}
+			on:click={async () => await submit()}
 		>
-	</svelte:fragment>
+			Submit
+		</Button>
+	{/snippet}
 </Modal>
 
 <style lang="postcss">
 	.message {
-		padding-bottom: var(--size-12);
+		padding-bottom: 12px;
 	}
 </style>

@@ -1,6 +1,7 @@
 <script lang="ts">
-	import '../styles/main.postcss';
+	import '../styles/main.css';
 
+	import { PromptService as AIPromptService } from '$lib/ai/promptService';
 	import { AIService } from '$lib/ai/service';
 	import { AuthService } from '$lib/backend/auth';
 	import { GitConfigService } from '$lib/backend/gitConfigService';
@@ -8,15 +9,18 @@
 	import { ProjectService } from '$lib/backend/projects';
 	import { PromptService } from '$lib/backend/prompt';
 	import { UpdaterService } from '$lib/backend/updater';
+	import { LineManagerFactory } from '$lib/commitLines/lineManager';
 	import AppUpdater from '$lib/components/AppUpdater.svelte';
+	import GlobalSettingsMenuAction from '$lib/components/GlobalSettingsMenuAction.svelte';
 	import PromptModal from '$lib/components/PromptModal.svelte';
 	import ShareIssueModal from '$lib/components/ShareIssueModal.svelte';
 	import { GitHubService } from '$lib/github/service';
 	import ToastController from '$lib/notifications/ToastController.svelte';
+	import { RemotesService } from '$lib/remotes/service';
 	import { SETTINGS, loadUserSettings } from '$lib/settings/userSettings';
 	import { User, UserService } from '$lib/stores/user';
 	import * as events from '$lib/utils/events';
-	import * as hotkeys from '$lib/utils/hotkeys';
+	import { createKeybind } from '$lib/utils/hotkeys';
 	import { initTheme } from '$lib/utils/theme';
 	import { unsubscribe } from '$lib/utils/unsubscribe';
 	import { onMount, setContext } from 'svelte';
@@ -42,6 +46,9 @@
 	setContext(AuthService, data.authService);
 	setContext(HttpClient, data.cloud);
 	setContext(User, data.userService.user);
+	setContext(RemotesService, data.remotesService);
+	setContext(AIPromptService, data.aiPromptService);
+	setContext(LineManagerFactory, data.lineManagerFactory);
 
 	let shareIssueModal: ShareIssueModal;
 
@@ -52,34 +59,37 @@
 	onMount(() => {
 		return unsubscribe(
 			events.on('goto', async (path: string) => await goto(path)),
-			events.on('openSendIssueModal', () => shareIssueModal?.show()),
-
-			// Zoom using cmd +, - and =
-			hotkeys.on('$mod+Equal', () => (zoom = Math.min(zoom + 0.0625, 3))),
-			hotkeys.on('$mod+Minus', () => (zoom = Math.max(zoom - 0.0625, 0.375))),
-			hotkeys.on('$mod+Digit0', () => (zoom = 1)),
-			hotkeys.on('Meta+T', () => {
-				userSettings.update((s) => ({
-					...s,
-					theme: $userSettings.theme == 'light' ? 'dark' : 'light'
-				}));
-			}),
-			hotkeys.on('Backspace', (e) => {
-				// This prevent backspace from navigating back
-				e.preventDefault();
-			}),
-			hotkeys.on('$mod+Shift+H', () => {
-				userSettings.update((s) => ({
-					...s,
-					showHistoryView: !$userSettings.showHistoryView
-				}));
-			}),
-			hotkeys.on('$mod+R', () => location.reload())
+			events.on('openSendIssueModal', () => shareIssueModal?.show())
 		);
+	});
+
+	const handleKeyDown = createKeybind({
+		'$mod+Equal': () => {
+			zoom = Math.min(zoom + 0.0625, 3);
+		},
+		'$mod+Minus': () => {
+			zoom = Math.max(zoom - 0.0625, 0.375);
+		},
+		'$mod+Digit0': () => {
+			zoom = 1;
+		},
+		'$mod+T': () => {
+			userSettings.update((s) => ({
+				...s,
+				theme: $userSettings.theme === 'light' ? 'dark' : 'light'
+			}));
+		},
+		'$mod+R': () => {
+			location.reload();
+		}
 	});
 </script>
 
-<svelte:window on:drop={(e) => e.preventDefault()} on:dragover={(e) => e.preventDefault()} />
+<svelte:window
+	on:keydown={handleKeyDown}
+	on:drop={(e) => e.preventDefault()}
+	on:dragover={(e) => e.preventDefault()}
+/>
 
 <div
 	data-tauri-drag-region
@@ -94,6 +104,7 @@
 <ToastController />
 <AppUpdater />
 <PromptModal />
+<GlobalSettingsMenuAction />
 
 <style lang="postcss">
 	.app-root {

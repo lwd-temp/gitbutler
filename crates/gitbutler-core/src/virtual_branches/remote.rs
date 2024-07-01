@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use bstr::BString;
 use serde::Serialize;
 
-use super::{errors, target, Author, VirtualBranchesHandle};
+use super::{target, Author, VirtualBranchesHandle};
 use crate::{
-    git,
+    git::{self, CommitExt, RepositoryExt},
     project_repository::{self, LogUntil},
 };
 
@@ -22,7 +22,8 @@ use crate::{
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteBranch {
-    pub sha: git::Oid,
+    #[serde(with = "crate::serde::oid")]
+    pub sha: git2::Oid,
     pub name: git::Refname,
     pub upstream: Option<git::RemoteRefname>,
     pub last_commit_timestamp_ms: Option<u128>,
@@ -32,11 +33,14 @@ pub struct RemoteBranch {
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteBranchData {
-    pub sha: git::Oid,
+    #[serde(with = "crate::serde::oid")]
+    pub sha: git2::Oid,
     pub name: git::Refname,
     pub upstream: Option<git::RemoteRefname>,
     pub behind: u32,
     pub commits: Vec<RemoteCommit>,
+    #[serde(with = "crate::serde::oid_opt", default)]
+    pub fork_point: Option<git2::Oid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -47,71 +51,59 @@ pub struct RemoteCommit {
     pub description: BString,
     pub created_at: u128,
     pub author: Author,
+    pub change_id: Option<String>,
+    #[serde(with = "crate::serde::oid_vec")]
+    pub parent_ids: Vec<git2::Oid>,
 }
 
+// for legacy purposes, this is still named "remote" branches, but it's actually
+// a list of all the normal (non-gitbutler) git branches.
 pub fn list_remote_branches(
     project_repository: &project_repository::Repository,
-) -> Result<Vec<RemoteBranch>, errors::ListRemoteBranchesError> {
-    let default_target = default_target(&project_repository.project().gb_dir())
-        .context("failed to get default target")?
-        .ok_or_else(|| {
-            errors::ListRemoteBranchesError::DefaultTargetNotSet(errors::DefaultTargetNotSet {
-                project_id: project_repository.project().id,
-            })
-        })?;
+) -> Result<Vec<RemoteBranch>> {
+    let default_target = default_target(&project_repository.project().gb_dir())?;
 
-    let remote_branches = project_repository
-        .git_repository
-        .branches(Some(git2::BranchType::Remote))
+    let mut remote_branches = vec![];
+    for (branch, _) in project_repository
+        .repo()
+        .branches(None)
         .context("failed to list remote branches")?
         .flatten()
-        .map(|(branch, _)| branch)
-        .map(|branch| branch_to_remote_branch(&branch))
-        .collect::<Result<Vec<_>>>()
-        .context("failed to convert branches")?
-        .into_iter()
-        .flatten()
-        .filter(|branch| branch.name.branch() != Some(default_target.branch.branch()))
-        .collect::<Vec<_>>();
+    {
+        let branch = branch_to_remote_branch(&branch)?;
 
+        if let Some(branch) = branch {
+            let branch_is_trunk = branch.name.branch() == Some(default_target.branch.branch())
+                && branch.name.remote() == Some(default_target.branch.remote());
+
+            if !branch_is_trunk
+                && branch.name.branch() != Some("gitbutler/integration")
+                && branch.name.branch() != Some("gitbutler/target")
+            {
+                remote_branches.push(branch);
+            }
+        }
+    }
     Ok(remote_branches)
 }
 
 pub fn get_branch_data(
     project_repository: &project_repository::Repository,
     refname: &git::Refname,
-) -> Result<super::RemoteBranchData, errors::GetRemoteBranchDataError> {
-    let default_target = default_target(&project_repository.project().gb_dir())
-        .context("failed to get default target")?
-        .ok_or_else(|| {
-            errors::GetRemoteBranchDataError::DefaultTargetNotSet(errors::DefaultTargetNotSet {
-                project_id: project_repository.project().id,
-            })
-        })?;
+) -> Result<RemoteBranchData> {
+    let default_target = default_target(&project_repository.project().gb_dir())?;
 
     let branch = project_repository
-        .git_repository
-        .find_branch(refname)
-        .context(format!("failed to find branch with refname {refname}"))?;
+        .repo()
+        .find_branch_by_refname(refname)?
+        .ok_or(anyhow::anyhow!("failed to find branch {}", refname))?;
 
-    let branch_data = branch_to_remote_branch_data(project_repository, &branch, default_target.sha)
-        .context("failed to get branch data")?;
-
-    branch_data
-        .ok_or_else(|| {
-            errors::GetRemoteBranchDataError::Other(anyhow::anyhow!("no data found for branch"))
-        })
-        .map(|branch_data| RemoteBranchData {
-            sha: branch_data.sha,
-            name: branch_data.name,
-            upstream: branch_data.upstream,
-            behind: branch_data.behind,
-            commits: branch_data.commits,
-        })
+    branch_to_remote_branch_data(project_repository, &branch, default_target.sha)?
+        .context("failed to get branch data")
 }
 
-pub fn branch_to_remote_branch(branch: &git::Branch) -> Result<Option<RemoteBranch>> {
-    let commit = match branch.peel_to_commit() {
+pub fn branch_to_remote_branch(branch: &git2::Branch) -> Result<Option<RemoteBranch>> {
+    let commit = match branch.get().peel_to_commit() {
         Ok(c) => c,
         Err(err) => {
             tracing::warn!(
@@ -122,36 +114,44 @@ pub fn branch_to_remote_branch(branch: &git::Branch) -> Result<Option<RemoteBran
             return Ok(None);
         }
     };
-    branch
-        .target()
-        .map(|sha| {
-            let name = git::Refname::try_from(branch).context("could not get branch name")?;
-            Ok(RemoteBranch {
-                sha,
-                upstream: if let git::Refname::Local(local_name) = &name {
-                    local_name.remote().cloned()
-                } else {
-                    None
-                },
-                name,
-                last_commit_timestamp_ms: commit
-                    .time()
-                    .seconds()
-                    .try_into()
-                    .map(|t: u128| t * 1000)
-                    .ok(),
-                last_commit_author: commit.author().name().map(std::string::ToString::to_string),
+    let name = git::Refname::try_from(branch).context("could not get branch name");
+    match name {
+        Ok(name) => branch
+            .get()
+            .target()
+            .map(|sha| {
+                Ok(RemoteBranch {
+                    sha,
+                    upstream: if let git::Refname::Local(local_name) = &name {
+                        local_name.remote().cloned()
+                    } else {
+                        None
+                    },
+                    name,
+                    last_commit_timestamp_ms: commit
+                        .time()
+                        .seconds()
+                        .try_into()
+                        .map(|t: u128| t * 1000)
+                        .ok(),
+                    last_commit_author: commit
+                        .author()
+                        .name()
+                        .map(std::string::ToString::to_string),
+                })
             })
-        })
-        .transpose()
+            .transpose(),
+        Err(_) => Ok(None),
+    }
 }
 
 pub fn branch_to_remote_branch_data(
     project_repository: &project_repository::Repository,
-    branch: &git::Branch,
-    base: git::Oid,
+    branch: &git2::Branch,
+    base: git2::Oid,
 ) -> Result<Option<RemoteBranchData>> {
     branch
+        .get()
         .target()
         .map(|sha| {
             let ahead = project_repository
@@ -163,6 +163,8 @@ pub fn branch_to_remote_branch_data(
             let count_behind = project_repository
                 .distance(base, sha)
                 .context("failed to get behind count")?;
+
+            let fork_point = ahead.last().and_then(|c| c.parent(0).ok()).map(|c| c.id());
 
             Ok(RemoteBranchData {
                 sha,
@@ -177,25 +179,24 @@ pub fn branch_to_remote_branch_data(
                     .into_iter()
                     .map(|commit| commit_to_remote_commit(&commit))
                     .collect::<Vec<_>>(),
+                fork_point,
             })
         })
         .transpose()
 }
 
-pub fn commit_to_remote_commit(commit: &git::Commit) -> RemoteCommit {
+pub fn commit_to_remote_commit(commit: &git2::Commit) -> RemoteCommit {
+    let parent_ids: Vec<git2::Oid> = commit.parents().map(|c| c.id()).collect::<Vec<_>>();
     RemoteCommit {
         id: commit.id().to_string(),
-        description: commit.message().to_owned(),
+        description: commit.message_bstr().to_owned(),
         created_at: commit.time().seconds().try_into().unwrap(),
         author: commit.author().into(),
+        change_id: commit.change_id(),
+        parent_ids,
     }
 }
 
-fn default_target(base_path: &Path) -> Result<Option<target::Target>> {
-    let vb_state = VirtualBranchesHandle::new(base_path);
-    match vb_state.get_default_target() {
-        Result::Ok(target) => Ok(Some(target)),
-        Err(crate::reader::Error::NotFound) => Ok(None),
-        Err(err) => Err(err.into()),
-    }
+fn default_target(base_path: &Path) -> Result<target::Target> {
+    VirtualBranchesHandle::new(base_path).get_default_target()
 }

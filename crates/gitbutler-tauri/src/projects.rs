@@ -2,7 +2,6 @@ pub mod commands {
     use anyhow::Context;
     use std::path;
 
-    use gitbutler_core::error::Code;
     use gitbutler_core::projects::{self, controller::Controller, ProjectId};
     use tauri::Manager;
     use tracing::instrument;
@@ -16,11 +15,7 @@ pub mod commands {
         handle: tauri::AppHandle,
         project: projects::UpdateRequest,
     ) -> Result<projects::Project, Error> {
-        handle
-            .state::<Controller>()
-            .update(&project)
-            .await
-            .map_err(Error::from_error_with_context)
+        Ok(handle.state::<Controller>().update(&project).await?)
     }
 
     #[tauri::command(async)]
@@ -29,10 +24,7 @@ pub mod commands {
         handle: tauri::AppHandle,
         path: &path::Path,
     ) -> Result<projects::Project, Error> {
-        handle
-            .state::<Controller>()
-            .add(path)
-            .map_err(Error::from_error_with_context)
+        Ok(handle.state::<Controller>().add(path)?)
     }
 
     #[tauri::command(async)]
@@ -41,10 +33,7 @@ pub mod commands {
         handle: tauri::AppHandle,
         id: ProjectId,
     ) -> Result<projects::Project, Error> {
-        handle
-            .state::<Controller>()
-            .get(&id)
-            .map_err(Error::from_error_with_context)
+        Ok(handle.state::<Controller>().get(id)?)
     }
 
     #[tauri::command(async)]
@@ -61,7 +50,7 @@ pub mod commands {
     pub async fn set_project_active(handle: tauri::AppHandle, id: ProjectId) -> Result<(), Error> {
         let project = handle
             .state::<Controller>()
-            .get(&id)
+            .get(id)
             .context("project not found")?;
         Ok(handle.state::<Watchers>().watch(&project)?)
     }
@@ -71,7 +60,7 @@ pub mod commands {
     pub async fn delete_project(handle: tauri::AppHandle, id: ProjectId) -> Result<(), Error> {
         handle
             .state::<Controller>()
-            .delete(&id)
+            .delete(id)
             .await
             .map_err(Into::into)
     }
@@ -83,10 +72,7 @@ pub mod commands {
         id: ProjectId,
         key: &str,
     ) -> Result<Option<String>, Error> {
-        Ok(handle
-            .state::<Controller>()
-            .get_local_config(&id, key)
-            .context(Code::Projects)?)
+        Ok(handle.state::<Controller>().get_local_config(id, key)?)
     }
 
     #[tauri::command(async)]
@@ -97,9 +83,21 @@ pub mod commands {
         key: &str,
         value: &str,
     ) -> Result<(), Error> {
-        Ok(handle
+        handle
             .state::<Controller>()
-            .set_local_config(&id, key, value)
-            .context(Code::Projects)?)
+            .set_local_config(id, key, value)
+            .map_err(Into::into)
+    }
+
+    #[tauri::command(async)]
+    #[instrument(skip(handle), err(Debug))]
+    pub async fn check_signing_settings(
+        handle: tauri::AppHandle,
+        id: ProjectId,
+    ) -> Result<bool, Error> {
+        handle
+            .state::<Controller>()
+            .check_signing_settings(id)
+            .map_err(Into::into)
     }
 }

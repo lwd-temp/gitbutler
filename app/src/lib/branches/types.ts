@@ -19,11 +19,21 @@ export class CombinedBranch {
 		this.remoteBranch = remoteBranch;
 		this.pr = pr;
 	}
+
+	get upstreamSha(): string {
+		return (
+			this.pr?.sha ||
+			this.remoteBranch?.sha ||
+			this.vbranch?.upstream?.sha ||
+			this.vbranch?.head ||
+			'unknown'
+		);
+	}
+
 	get displayName(): string {
-		if (this.vbranch) return this.vbranch.name;
-		if (this.pr) return this.pr.title;
-		if (this.remoteBranch) return this.remoteBranch.displayName;
-		return 'unknown';
+		return (
+			this.pr?.sourceBranch || this.remoteBranch?.displayName || this.vbranch?.name || 'unknown'
+		);
 	}
 
 	get authors(): Author[] {
@@ -43,7 +53,7 @@ export class CombinedBranch {
 	}
 
 	get author(): Author | undefined {
-		if (this.authors.length == 0) {
+		if (this.authors.length === 0) {
 			return undefined;
 		}
 		return this.authors[0];
@@ -57,13 +67,12 @@ export class CombinedBranch {
 	get color(): 'neutral' | 'success' | 'pop' | 'purple' | undefined {
 		if (this.pr?.mergedAt) return 'purple'; // merged PR
 		if (this.pr) return 'success'; // open PR
-		if (this.vbranch && this.vbranch.active == false) return 'pop'; // stashed virtual branches
+		if (this.vbranch && this.vbranch.active === false) return 'pop'; // stashed virtual branches
 		// if (this.remoteBranch?.isMergeable) return 'success'; // remote branches
 		return 'neutral';
 	}
 
 	get modifiedAt(): Date | undefined {
-		if (this.pr) return this.pr.modifiedAt || this.pr.createdAt;
 		if (this.vbranch) return this.vbranch.updatedAt;
 		if (this.remoteBranch) {
 			return this.remoteBranch.lastCommitTimestampMs
@@ -94,7 +103,7 @@ export class CombinedBranch {
 		if (this.vbranch) identifiers.push(this.vbranch.name);
 		if (this.pr) {
 			identifiers.push(this.pr.title);
-			identifiers.push(this.pr.targetBranch);
+			identifiers.push(this.pr.sourceBranch);
 			this.pr.author?.email && identifiers.push(this.pr.author.email);
 			this.pr.author?.name && identifiers.push(this.pr.author.name);
 		}
@@ -107,9 +116,9 @@ export class CombinedBranch {
 	}
 
 	currentState(): BranchState | undefined {
-		if (this.vbranch) return BranchState.VirtualBranch;
 		if (this.pr) return BranchState.PR;
 		if (this.remoteBranch) return BranchState.RemoteBranch;
+		if (this.vbranch) return BranchState.VirtualBranch;
 		return undefined;
 	}
 }

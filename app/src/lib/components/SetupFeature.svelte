@@ -4,8 +4,6 @@
 	export let topBorder = false;
 
 	export let labelFor = '';
-
-	const SLOTS = $$props.$$slots;
 </script>
 
 <label
@@ -14,7 +12,7 @@
 	class:success
 	class:disabled
 	class:top-border={topBorder}
-	class:clickable={labelFor !== '' && !SLOTS.actions}
+	class:clickable={labelFor !== '' && !$$slots.actions}
 >
 	<div class="setup-feature__icon">
 		<slot name="icon" />
@@ -28,14 +26,14 @@
 			<div class="setup-feature__body text-base-body-12">
 				<slot name="body" />
 			</div>
-			{#if SLOTS.actions}
+			{#if $$slots.actions}
 				<div class="setup-feature__toggle">
 					<slot name="toggle" />
 				</div>
 			{/if}
 		</div>
 
-		{#if SLOTS.actions}
+		{#if $$slots.actions}
 			<div class="setup-feature__actions">
 				<slot name="actions" />
 			</div>
@@ -46,8 +44,8 @@
 <style lang="postcss">
 	.setup-feature {
 		display: flex;
-		gap: var(--size-16);
-		padding: var(--size-20);
+		gap: 16px;
+		padding: 20px;
 	}
 	.disabled.setup-feature {
 		background: var(--clr-bg-2);
@@ -61,11 +59,11 @@
 		display: flex;
 		flex-direction: column;
 		flex-grow: 1;
-		gap: var(--size-10);
+		gap: 10px;
 	}
 
 	.setup-feature__title {
-		gap: var(--size-6);
+		gap: 6px;
 		line-height: 120%;
 	}
 
@@ -73,7 +71,7 @@
 		display: flex;
 		align-items: center;
 		width: 100%;
-		gap: var(--size-10);
+		gap: 10px;
 	}
 
 	.disabled .setup-feature__icon {
@@ -88,7 +86,7 @@
 
 	.setup-feature__row {
 		display: flex;
-		gap: var(--size-10);
+		gap: 10px;
 		align-items: center;
 	}
 

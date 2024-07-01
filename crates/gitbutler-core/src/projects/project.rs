@@ -5,21 +5,20 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    git, id::Id, types::default_true::DefaultTrue, virtual_branches::VirtualBranchesHandle,
-};
+use crate::{id::Id, types::default_true::DefaultTrue, virtual_branches::VirtualBranchesHandle};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum AuthKey {
-    Default,
     Generated,
-    #[default]
-    SystemExecutable,
     GitCredentialsHelper,
     Local {
         private_key_path: path::PathBuf,
     },
+    // There used to be more auth option variants that we are deprecating and replacing with this
+    #[serde(other)]
+    #[default]
+    SystemExecutable,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -56,7 +55,8 @@ impl FetchResult {
 
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub struct CodePushState {
-    pub id: git::Oid,
+    #[serde(with = "crate::serde::oid")]
+    pub id: git2::Oid,
     pub timestamp: time::SystemTime,
 }
 
@@ -68,6 +68,8 @@ pub struct Project {
     pub title: String,
     pub description: Option<String>,
     /// The worktree directory of the project's repository.
+    // TODO(ST): rename this to `worktree_dir` and while at it, add a `git_dir` if it's retrieved from a repo.
+    //           Then find `.join(".git")` and use the `git_dir` instead.
     pub path: path::PathBuf,
     #[serde(default)]
     pub preferred_key: AuthKey,
@@ -84,10 +86,15 @@ pub struct Project {
     pub project_data_last_fetch: Option<FetchResult>,
     #[serde(default)]
     pub omit_certificate_check: Option<bool>,
-    #[serde(default)]
-    pub enable_snapshots: Option<bool>,
     // The number of changed lines that will trigger a snapshot
     pub snapshot_lines_threshold: Option<usize>,
+
+    #[serde(default = "default_true")]
+    pub use_new_locking: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Project {

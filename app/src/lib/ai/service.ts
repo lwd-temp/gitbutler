@@ -1,48 +1,27 @@
 import { AnthropicAIClient } from '$lib/ai/anthropicClient';
 import { ButlerAIClient } from '$lib/ai/butlerClient';
+import {
+	DEFAULT_OLLAMA_ENDPOINT,
+	DEFAULT_OLLAMA_MODEL_NAME,
+	OllamaClient
+} from '$lib/ai/ollamaClient';
 import { OpenAIClient } from '$lib/ai/openAIClient';
-import { OpenAIModelName, type AIClient, AnthropicModelName } from '$lib/ai/types';
+import {
+	OpenAIModelName,
+	type AIClient,
+	AnthropicModelName,
+	ModelKind,
+	MessageRole,
+	type Prompt
+} from '$lib/ai/types';
+import { buildFailureFromAny, isFailure, ok, type Result } from '$lib/result';
 import { splitMessage } from '$lib/utils/commitMessage';
-import * as toasts from '$lib/utils/toasts';
 import OpenAI from 'openai';
 import type { GitConfigService } from '$lib/backend/gitConfigService';
 import type { HttpClient } from '$lib/backend/httpClient';
 import type { Hunk } from '$lib/vbranches/types';
 
 const maxDiffLengthLimitForAPI = 5000;
-
-const defaultCommitTemplate = `
-Please could you write a commit message for my changes.
-Explain what were the changes and why the changes were done.
-Focus the most important changes.
-Use the present tense.
-Use a semantic commit prefix.
-Hard wrap lines at 72 characters.
-Ensure the title is only 50 characters.
-Do not start any lines with the hash symbol.
-Only respond with the commit message.
-%{brief_style}
-%{emoji_style}
-
-Here is my git diff:
-%{diff}
-`;
-
-const defaultBranchTemplate = `
-Please could you write a branch name for my changes.
-A branch name represent a brief description of the changes in the diff (branch).
-Branch names should contain no whitespace and instead use dashes to separate words.
-Branch names should contain a maximum of 5 words.
-Only respond with the branch name.
-
-Here is my git diff:
-%{diff}
-`;
-
-export enum ModelKind {
-	OpenAI = 'openai',
-	Anthropic = 'anthropic'
-}
 
 export enum KeyOption {
 	BringYourOwn = 'bringYourOwn',
@@ -57,20 +36,22 @@ export enum GitAIConfigKey {
 	AnthropicKeyOption = 'gitbutler.aiAnthropicKeyOption',
 	AnthropicModelName = 'gitbutler.aiAnthropicModelName',
 	AnthropicKey = 'gitbutler.aiAnthropicKey',
-	DiffLengthLimit = 'gitbutler.diffLengthLimit'
+	DiffLengthLimit = 'gitbutler.diffLengthLimit',
+	OllamaEndpoint = 'gitbutler.aiOllamaEndpoint',
+	OllamaModelName = 'gitbutler.aiOllamaModelName'
 }
 
 type SummarizeCommitOpts = {
 	hunks: Hunk[];
 	useEmojiStyle?: boolean;
 	useBriefStyle?: boolean;
-	commitTemplate?: string;
+	commitTemplate?: Prompt;
 	userToken?: string;
 };
 
 type SummarizeBranchOpts = {
 	hunks: Hunk[];
-	branchTemplate?: string;
+	branchTemplate?: Prompt;
 	userToken?: string;
 };
 
@@ -84,7 +65,7 @@ export function buildDiff(hunks: Hunk[], limit: number) {
 function shuffle<T>(items: T[]): T[] {
 	return items
 		.map((item) => ({ item, value: Math.random() }))
-		.sort()
+		.sort(({ value: a }, { value: b }) => a - b)
 		.map((item) => item.item);
 }
 
@@ -159,15 +140,29 @@ export class AIService {
 		}
 	}
 
+	async getOllamaEndpoint() {
+		return await this.gitConfig.getWithDefault<string>(
+			GitAIConfigKey.OllamaEndpoint,
+			DEFAULT_OLLAMA_ENDPOINT
+		);
+	}
+
+	async getOllamaModelName() {
+		return await this.gitConfig.getWithDefault<string>(
+			GitAIConfigKey.OllamaModelName,
+			DEFAULT_OLLAMA_MODEL_NAME
+		);
+	}
+
 	async usingGitButlerAPI() {
 		const modelKind = await this.getModelKind();
 		const openAIKeyOption = await this.getOpenAIKeyOption();
 		const anthropicKeyOption = await this.getAnthropicKeyOption();
 
 		const openAIActiveAndUsingButlerAPI =
-			modelKind == ModelKind.OpenAI && openAIKeyOption == KeyOption.ButlerAPI;
+			modelKind === ModelKind.OpenAI && openAIKeyOption === KeyOption.ButlerAPI;
 		const anthropicActiveAndUsingButlerAPI =
-			modelKind == ModelKind.Anthropic && anthropicKeyOption == KeyOption.ButlerAPI;
+			modelKind === ModelKind.Anthropic && anthropicKeyOption === KeyOption.ButlerAPI;
 
 		return openAIActiveAndUsingButlerAPI || anthropicActiveAndUsingButlerAPI;
 	}
@@ -176,103 +171,147 @@ export class AIService {
 		const modelKind = await this.getModelKind();
 		const openAIKey = await this.getOpenAIKey();
 		const anthropicKey = await this.getAnthropicKey();
+		const ollamaEndpoint = await this.getOllamaEndpoint();
+		const ollamaModelName = await this.getOllamaModelName();
 
 		if (await this.usingGitButlerAPI()) return !!userToken;
 
-		const openAIActiveAndKeyProvided = modelKind == ModelKind.OpenAI && !!openAIKey;
-		const anthropicActiveAndKeyProvided = modelKind == ModelKind.Anthropic && !!anthropicKey;
+		const openAIActiveAndKeyProvided = modelKind === ModelKind.OpenAI && !!openAIKey;
+		const anthropicActiveAndKeyProvided = modelKind === ModelKind.Anthropic && !!anthropicKey;
+		const ollamaActiveAndEndpointProvided =
+			modelKind === ModelKind.Ollama && !!ollamaEndpoint && !!ollamaModelName;
 
-		return openAIActiveAndKeyProvided || anthropicActiveAndKeyProvided;
+		return (
+			openAIActiveAndKeyProvided || anthropicActiveAndKeyProvided || ollamaActiveAndEndpointProvided
+		);
 	}
 
 	// This optionally returns a summarizer. There are a few conditions for how this may occur
 	// Firstly, if the user has opted to use the GB API and isn't logged in, it will return undefined
 	// Secondly, if the user has opted to bring their own key but hasn't provided one, it will return undefined
-	async buildClient(userToken?: string): Promise<undefined | AIClient> {
+	async buildClient(userToken?: string): Promise<Result<AIClient, Error>> {
 		const modelKind = await this.getModelKind();
 
 		if (await this.usingGitButlerAPI()) {
 			if (!userToken) {
-				toasts.error("When using GitButler's API to summarize code, you must be logged in");
-				return;
+				return buildFailureFromAny(
+					"When using GitButler's API to summarize code, you must be logged in"
+				);
 			}
-			return new ButlerAIClient(this.cloud, userToken, modelKind);
+			return ok(new ButlerAIClient(this.cloud, userToken, modelKind));
 		}
 
-		if (modelKind == ModelKind.OpenAI) {
+		if (modelKind === ModelKind.Ollama) {
+			const ollamaEndpoint = await this.getOllamaEndpoint();
+			const ollamaModelName = await this.getOllamaModelName();
+			return ok(new OllamaClient(ollamaEndpoint, ollamaModelName));
+		}
+
+		if (modelKind === ModelKind.OpenAI) {
 			const openAIModelName = await this.getOpenAIModleName();
 			const openAIKey = await this.getOpenAIKey();
 
 			if (!openAIKey) {
-				toasts.error(
+				return buildFailureFromAny(
 					'When using OpenAI in a bring your own key configuration, you must provide a valid token'
 				);
-				return;
 			}
 
 			const openAI = new OpenAI({ apiKey: openAIKey, dangerouslyAllowBrowser: true });
-			return new OpenAIClient(openAIModelName, openAI);
+			return ok(new OpenAIClient(openAIModelName, openAI));
 		}
 
-		if (modelKind == ModelKind.Anthropic) {
+		if (modelKind === ModelKind.Anthropic) {
 			const anthropicModelName = await this.getAnthropicModelName();
 			const anthropicKey = await this.getAnthropicKey();
 
 			if (!anthropicKey) {
-				toasts.error(
+				return buildFailureFromAny(
 					'When using Anthropic in a bring your own key configuration, you must provide a valid token'
 				);
-				return;
 			}
 
-			return new AnthropicAIClient(anthropicKey, anthropicModelName);
+			return ok(new AnthropicAIClient(anthropicKey, anthropicModelName));
 		}
+
+		return buildFailureFromAny('Failed to build ai client');
 	}
 
 	async summarizeCommit({
 		hunks,
 		useEmojiStyle = false,
 		useBriefStyle = false,
-		commitTemplate = defaultCommitTemplate,
+		commitTemplate,
 		userToken
-	}: SummarizeCommitOpts) {
-		const aiClient = await this.buildClient(userToken);
-		if (!aiClient) return;
+	}: SummarizeCommitOpts): Promise<Result<string, Error>> {
+		const aiClientResult = await this.buildClient(userToken);
+		if (isFailure(aiClientResult)) return aiClientResult;
+		const aiClient = aiClientResult.value;
 
 		const diffLengthLimit = await this.getDiffLengthLimitConsideringAPI();
-		let prompt = commitTemplate.replaceAll('%{diff}', buildDiff(hunks, diffLengthLimit));
+		const defaultedCommitTemplate = commitTemplate || aiClient.defaultCommitTemplate;
 
-		const briefPart = useBriefStyle
-			? 'The commit message must be only one sentence and as short as possible.'
-			: '';
-		prompt = prompt.replaceAll('%{brief_style}', briefPart);
+		const prompt = defaultedCommitTemplate.map((promptMessage) => {
+			if (promptMessage.role !== MessageRole.User) {
+				return promptMessage;
+			}
 
-		const emojiPart = useEmojiStyle
-			? 'Make use of GitMoji in the title prefix.'
-			: "Don't use any emoji.";
-		prompt = prompt.replaceAll('%{emoji_style}', emojiPart);
+			let content = promptMessage.content.replaceAll('%{diff}', buildDiff(hunks, diffLengthLimit));
 
-		let message = await aiClient.evaluate(prompt);
+			const briefPart = useBriefStyle
+				? 'The commit message must be only one sentence and as short as possible.'
+				: '';
+			content = content.replaceAll('%{brief_style}', briefPart);
+
+			const emojiPart = useEmojiStyle
+				? 'Make use of GitMoji in the title prefix.'
+				: "Don't use any emoji.";
+			content = content.replaceAll('%{emoji_style}', emojiPart);
+
+			return {
+				role: MessageRole.User,
+				content
+			};
+		});
+
+		const messageResult = await aiClient.evaluate(prompt);
+		if (isFailure(messageResult)) return messageResult;
+		let message = messageResult.value;
 
 		if (useBriefStyle) {
 			message = message.split('\n')[0];
 		}
 
 		const { title, description } = splitMessage(message);
-		return description ? `${title}\n\n${description}` : title;
+		return ok(description ? `${title}\n\n${description}` : title);
 	}
 
 	async summarizeBranch({
 		hunks,
-		branchTemplate = defaultBranchTemplate,
+		branchTemplate,
 		userToken = undefined
-	}: SummarizeBranchOpts) {
-		const aiClient = await this.buildClient(userToken);
-		if (!aiClient) return;
+	}: SummarizeBranchOpts): Promise<Result<string, Error>> {
+		const aiClientResult = await this.buildClient(userToken);
+		if (isFailure(aiClientResult)) return aiClientResult;
+		const aiClient = aiClientResult.value;
 
 		const diffLengthLimit = await this.getDiffLengthLimitConsideringAPI();
-		const prompt = branchTemplate.replaceAll('%{diff}', buildDiff(hunks, diffLengthLimit));
-		const message = await aiClient.evaluate(prompt);
-		return message.replaceAll(' ', '-').replaceAll('\n', '-');
+		const defaultedBranchTemplate = branchTemplate || aiClient.defaultBranchTemplate;
+		const prompt = defaultedBranchTemplate.map((promptMessage) => {
+			if (promptMessage.role !== MessageRole.User) {
+				return promptMessage;
+			}
+
+			return {
+				role: MessageRole.User,
+				content: promptMessage.content.replaceAll('%{diff}', buildDiff(hunks, diffLengthLimit))
+			};
+		});
+
+		const messageResult = await aiClient.evaluate(prompt);
+		if (isFailure(messageResult)) return messageResult;
+		const message = messageResult.value;
+
+		return ok(message.replaceAll(' ', '-').replaceAll('\n', '-'));
 	}
 }

@@ -1,11 +1,17 @@
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::Read;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bstr::BString;
-use gix::dir::walk::EmissionMode;
-use gix::tempfile::create_dir::Retries;
-use gix::tempfile::{AutoRemove, ContainingDirectory};
+use gix::{
+    dir::walk::EmissionMode,
+    tempfile::{create_dir::Retries, AutoRemove, ContainingDirectory},
+};
+use serde::de::DeserializeOwned;
 use walkdir::WalkDir;
 
 // Returns an ordered list of relative paths for files inside a directory recursively.
@@ -58,21 +64,13 @@ pub(crate) fn write<P: AsRef<Path>>(
     file_path: P,
     contents: impl AsRef<[u8]>,
 ) -> anyhow::Result<()> {
-    #[cfg(windows)]
-    {
-        Ok(std::fs::write(file_path, contents)?)
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut temp_file = gix::tempfile::new(
-            file_path.as_ref().parent().unwrap(),
-            ContainingDirectory::Exists,
-            AutoRemove::Tempfile,
-        )?;
-        temp_file.write_all(contents.as_ref())?;
-        Ok(persist_tempfile(temp_file, file_path)?)
-    }
+    let mut temp_file = gix::tempfile::new(
+        file_path.as_ref().parent().unwrap(),
+        ContainingDirectory::Exists,
+        AutoRemove::Tempfile,
+    )?;
+    temp_file.write_all(contents.as_ref())?;
+    Ok(persist_tempfile(temp_file, file_path)?)
 }
 
 /// Write a single file so that the write either fully succeeds, or fully fails,
@@ -81,25 +79,13 @@ pub(crate) fn create_dirs_then_write<P: AsRef<Path>>(
     file_path: P,
     contents: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {
-    #[cfg(windows)]
-    {
-        let dir = file_path.as_ref().parent().unwrap();
-        if !dir.exists() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(file_path, contents)
-    }
-
-    #[cfg(not(windows))]
-    {
-        let mut temp_file = gix::tempfile::new(
-            file_path.as_ref().parent().unwrap(),
-            ContainingDirectory::CreateAllRaceProof(Retries::default()),
-            AutoRemove::Tempfile,
-        )?;
-        temp_file.write_all(contents.as_ref())?;
-        persist_tempfile(temp_file, file_path)
-    }
+    let mut temp_file = gix::tempfile::new(
+        file_path.as_ref().parent().unwrap(),
+        ContainingDirectory::CreateAllRaceProof(Retries::default()),
+        AutoRemove::Tempfile,
+    )?;
+    temp_file.write_all(contents.as_ref())?;
+    persist_tempfile(temp_file, file_path)
 }
 
 fn persist_tempfile(
@@ -107,15 +93,26 @@ fn persist_tempfile(
     to_path: impl AsRef<Path>,
 ) -> std::io::Result<()> {
     match tempfile.persist(to_path) {
-        Ok(Some(_opened_file)) => {
-            // EXPERIMENT: Does this fix #3601?
-            #[cfg(windows)]
-            _opened_file.sync_all()?;
-            Ok(())
-        }
+        Ok(Some(_opened_file)) => Ok(()),
         Ok(None) => unreachable!(
             "BUG: a signal has caused the tempfile to be removed, but we didn't install a handler"
         ),
         Err(err) => Err(err.error),
     }
+}
+
+/// Reads and parses the state file.
+///
+/// If the file does not exist, it will be created.
+pub(crate) fn read_toml_file_or_default<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(err) => return Err(err.into()),
+    };
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    let value: T =
+        toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))?;
+    Ok(value)
 }
